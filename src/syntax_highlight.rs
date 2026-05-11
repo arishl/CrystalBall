@@ -26,8 +26,16 @@ pub fn highlighted_code_job(
     code: &str,
     language: CodeLanguage,
 ) -> egui::text::LayoutJob {
+    highlighted_code_job_with_width(ui.available_width(), code, language)
+}
+
+pub fn highlighted_code_job_with_width(
+    wrap_width: f32,
+    code: &str,
+    language: CodeLanguage,
+) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = ui.available_width();
+    job.wrap.max_width = wrap_width;
 
     let chars: Vec<char> = code.chars().collect();
     let mut i = 0;

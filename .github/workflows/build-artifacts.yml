@@ -1,0 +1,79 @@
+name: Build Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: CrystalBall
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+            binary: CrystalBall
+            archive: CrystalBall-linux-x86_64.tar.gz
+          - name: macos
+            os: macos-latest
+            binary: CrystalBall
+            archive: CrystalBall-macos.tar.gz
+          - name: windows
+            os: windows-latest
+            binary: CrystalBall.exe
+            archive: CrystalBall-windows-x86_64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist/${{ matrix.name }}
+          cp target/release/${{ matrix.binary }} dist/${{ matrix.name }}/
+          cp README.md dist/${{ matrix.name }}/
+
+      - name: Package artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tar -C dist/${{ matrix.name }} -czf dist/${{ matrix.archive }} .
+
+      - name: Package artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/${{ matrix.name }}/* -DestinationPath dist/${{ matrix.archive }}
+
+      - name: Upload downloadable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Attach artifacts to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.archive }}

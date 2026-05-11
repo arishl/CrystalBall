@@ -5,30 +5,39 @@ use std::process::Command;
 
 use eframe::egui;
 
-use crate::file_content::{TextDocument, TextKind, read_preview, read_tab_document};
+mod editor;
+mod hover_preview;
+mod preview;
+mod shell;
+mod theme;
+
+use editor::{EditorAction, OpenTab, show_editor, show_tab_strip};
+use hover_preview::PREVIEW_CLOSE_GRACE_SECONDS;
+use preview::HoverPreview;
+use shell::{TerminalCommand, default_shell, parse_terminal_command};
+use theme::{StatusMessage, apply_theme};
+
+use crate::file_content::{TextDocument, read_preview, read_tab_document};
 use crate::file_entry::FileEntry;
-use crate::markdown_view::show_markdown;
-use crate::syntax_highlight::show_code;
-use crate::terminal::{
-    TERMINAL_ACCENT, TERMINAL_BG, TERMINAL_ERROR, TERMINAL_MUTED, TERMINAL_PANEL_BG, TERMINAL_TEXT,
-    TerminalState, show_terminal,
-};
+use crate::terminal::{TERMINAL_MUTED, TerminalState, show_terminal};
 
 const DEFAULT_TERMINAL_HEIGHT: f32 = 220.0;
 const MIN_TERMINAL_HEIGHT: f32 = 120.0;
 const TERMINAL_DRAG_HANDLE_HEIGHT: f32 = 10.0;
-
 pub struct FileExplorerApp {
     current_dir: PathBuf,
     entries: Vec<FileEntry>,
     selected: Option<PathBuf>,
     open_tabs: Vec<OpenTab>,
     active_tab: Option<usize>,
+    hover_preview: Option<HoverPreview>,
+    preview_row_hovered: bool,
+    preview_keep_until: f64,
     preview_cache: HashMap<PathBuf, Result<Option<TextDocument>, String>>,
     terminal: TerminalState,
     terminal_height: f32,
     terminal_drag_start_height: Option<f32>,
-    status: Option<String>,
+    status: Option<StatusMessage>,
 }
 
 impl Default for FileExplorerApp {
@@ -40,6 +49,9 @@ impl Default for FileExplorerApp {
             selected: None,
             open_tabs: Vec::new(),
             active_tab: None,
+            hover_preview: None,
+            preview_row_hovered: false,
+            preview_keep_until: 0.0,
             preview_cache: HashMap::new(),
             terminal: TerminalState::default(),
             terminal_height: DEFAULT_TERMINAL_HEIGHT,
@@ -71,10 +83,10 @@ impl FileExplorerApp {
                 });
             }
             Err(err) => {
-                self.status = Some(format!(
+                self.status = Some(StatusMessage::error(format!(
                     "Could not read {}: {err}",
                     self.current_dir.display()
-                ));
+                )));
             }
         }
     }
@@ -112,10 +124,19 @@ impl FileExplorerApp {
             .unwrap_or_else(|| path.display().to_string());
 
         let document = read_tab_document(&path).map_err(|err| err.to_string());
+        let draft = document
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(|document| document.text.clone())
+            .unwrap_or_default();
+
         self.open_tabs.push(OpenTab {
             path,
             title,
             document,
+            draft,
+            dirty: false,
         });
         self.active_tab = Some(self.open_tabs.len() - 1);
     }
@@ -129,11 +150,75 @@ impl FileExplorerApp {
         };
     }
 
+    fn save_tab(&mut self, index: usize) {
+        let Some(tab) = self.open_tabs.get_mut(index) else {
+            return;
+        };
+
+        match &mut tab.document {
+            Ok(Some(document)) if document.truncated => {
+                self.status = Some(StatusMessage::error(
+                    "This file is too large to save from the preview editor.",
+                ));
+            }
+            Ok(Some(document)) => match fs::write(&tab.path, &tab.draft) {
+                Ok(()) => {
+                    document.text.clone_from(&tab.draft);
+                    tab.dirty = false;
+                    self.preview_cache.remove(&tab.path);
+                    self.status = Some(StatusMessage::info(format!("Saved {}", tab.title)));
+                }
+                Err(err) => {
+                    self.status = Some(StatusMessage::error(format!(
+                        "Could not save {}: {err}",
+                        tab.title
+                    )));
+                }
+            },
+            Ok(None) => {
+                self.status = Some(StatusMessage::error("This does not look like a text file."));
+            }
+            Err(err) => {
+                self.status = Some(StatusMessage::error(format!(
+                    "Could not save {}: {err}",
+                    tab.title
+                )));
+            }
+        }
+    }
+
+    fn revert_tab(&mut self, index: usize) {
+        let Some(tab) = self.open_tabs.get_mut(index) else {
+            return;
+        };
+
+        tab.document = read_tab_document(&tab.path).map_err(|err| err.to_string());
+        tab.draft = tab
+            .document
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(|document| document.text.clone())
+            .unwrap_or_default();
+        tab.dirty = false;
+        self.preview_cache.remove(&tab.path);
+        self.status = Some(StatusMessage::info(format!("Reverted {}", tab.title)));
+    }
+
     fn show_file_row(&mut self, ui: &mut egui::Ui, entry: FileEntry) {
         let selected = self.selected.as_ref() == Some(&entry.path);
-        let icon = if entry.is_dir { "[D]" } else { "[F]" };
-        let label = format!("{icon} {}", entry.name);
-        let response = ui.selectable_label(selected, label);
+        let label = if entry.is_dir {
+            format!("[dir]  {}", entry.name)
+        } else {
+            format!("[file] {}", entry.name)
+        };
+        let response = ui
+            .selectable_label(selected, egui::RichText::new(label).monospace())
+            .on_hover_cursor(if entry.is_dir {
+                egui::CursorIcon::PointingHand
+            } else {
+                egui::CursorIcon::Text
+            });
 
         if response.clicked() {
             self.selected = Some(entry.path.clone());
@@ -143,18 +228,24 @@ impl FileExplorerApp {
             }
         }
 
-        if response.double_clicked() && entry.is_dir {
-            self.open_directory(entry.path.clone());
+        if response.double_clicked() {
+            self.selected = Some(entry.path.clone());
+
+            if entry.is_dir {
+                self.open_directory(entry.path.clone());
+            } else {
+                self.open_file_tab(entry.path.clone());
+            }
         }
 
         if !entry.is_dir && response.hovered() {
-            let preview = self.preview_for(&entry.path);
-
-            response.on_hover_ui(|ui| {
-                ui.set_max_width(540.0);
-                ui.label(egui::RichText::new(&entry.name).strong());
-                ui.separator();
-                show_document_preview(ui, preview);
+            self.preview_row_hovered = true;
+            self.preview_keep_until = ui.input(|input| input.time) + PREVIEW_CLOSE_GRACE_SECONDS;
+            self.hover_preview = Some(HoverPreview {
+                path: entry.path.clone(),
+                title: entry.name.clone(),
+                anchor: response.rect.right_top() + egui::vec2(6.0, -4.0),
+                source_rect: response.rect,
             });
         }
     }
@@ -167,41 +258,61 @@ impl FileExplorerApp {
         });
     }
 
-    fn show_tabs(&mut self, ui: &mut egui::Ui) {
+    fn show_editor_panel(&mut self, ui: &mut egui::Ui) {
         if self.open_tabs.is_empty() {
             ui.centered_and_justified(|ui| {
-                ui.label("Click a text or Markdown file to open it here.");
+                ui.label(
+                    egui::RichText::new("Double-click a text file to edit it here.")
+                        .color(TERMINAL_MUTED),
+                );
             });
             return;
         }
 
-        let mut tab_to_close = None;
-
-        ui.horizontal_wrapped(|ui| {
-            for (index, tab) in self.open_tabs.iter().enumerate() {
-                let active = self.active_tab == Some(index);
-
-                if ui.selectable_label(active, &tab.title).clicked() {
-                    self.active_tab = Some(index);
-                }
-
-                if ui.small_button("x").clicked() {
-                    tab_to_close = Some(index);
-                }
-            }
+        ui.horizontal(|ui| {
+            ui.heading("Editor");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{} open", self.open_tabs.len()))
+                        .color(TERMINAL_MUTED),
+                );
+            });
         });
 
-        if let Some(index) = tab_to_close {
+        if let Some(index) = show_tab_strip(ui, &self.open_tabs, &mut self.active_tab) {
             self.close_tab(index);
         }
 
         ui.separator();
 
-        if let Some(tab) = self.active_tab.and_then(|index| self.open_tabs.get(index)) {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                show_open_tab(ui, tab);
-            });
+        if let Some(index) = self
+            .active_tab
+            .filter(|index| *index < self.open_tabs.len())
+        {
+            let action = show_editor(ui, &mut self.open_tabs[index]);
+
+            match action {
+                EditorAction::None => {}
+                EditorAction::Save => self.save_tab(index),
+                EditorAction::Revert => self.revert_tab(index),
+            }
         }
+    }
+
+    fn show_hover_preview(&mut self, ctx: &egui::Context) {
+        let Some(preview) = self.hover_preview.clone() else {
+            return;
+        };
+
+        let document = self.preview_for(&preview.path);
+        hover_preview::show_hover_preview(
+            ctx,
+            &mut self.hover_preview,
+            preview,
+            self.preview_row_hovered,
+            &mut self.preview_keep_until,
+            document,
+        );
     }
 
     fn run_terminal_command(&mut self, command: String) {
@@ -321,7 +432,8 @@ impl FileExplorerApp {
 
 impl eframe::App for FileExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        apply_terminal_theme(ctx);
+        apply_theme(ctx);
+        self.preview_row_hovered = false;
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -334,7 +446,11 @@ impl eframe::App for FileExplorerApp {
                 }
 
                 ui.separator();
-                ui.label(self.current_dir.display().to_string());
+                ui.label(
+                    egui::RichText::new(self.current_dir.display().to_string())
+                        .monospace()
+                        .color(TERMINAL_MUTED),
+                );
             });
         });
 
@@ -342,179 +458,26 @@ impl eframe::App for FileExplorerApp {
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             if let Some(status) = &self.status {
-                ui.colored_label(egui::Color32::from_rgb(190, 70, 70), status);
-            } else if let Some(selected) = &self.selected {
-                ui.label(selected.display().to_string());
+                ui.colored_label(status.color(), &status.text);
             } else {
-                ui.label(
-                    "Hover over text files to preview them. Markdown previews render as Markdown.",
-                );
+                ui.label("Click or double-click a text file to open it in the editor.");
             }
         });
 
         egui::SidePanel::left("file_explorer")
             .resizable(true)
-            .default_width(320.0)
+            .default_width(360.0)
             .show(ctx, |ui| {
-                ui.heading("Files");
+                ui.heading("Explorer");
+                ui.label(egui::RichText::new("Folders open on double-click").color(TERMINAL_MUTED));
                 ui.add_space(6.0);
                 self.show_explorer(ui);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.show_tabs(ui);
+            self.show_editor_panel(ui);
         });
-    }
-}
 
-fn apply_terminal_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    let subtle_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 47, 55));
-    let active_stroke = egui::Stroke::new(1.0, TERMINAL_ACCENT);
-
-    visuals.override_text_color = Some(TERMINAL_TEXT);
-    visuals.panel_fill = TERMINAL_BG;
-    visuals.window_fill = TERMINAL_PANEL_BG;
-    visuals.extreme_bg_color = TERMINAL_BG;
-    visuals.faint_bg_color = egui::Color32::from_rgb(28, 32, 38);
-    visuals.code_bg_color = TERMINAL_BG;
-    visuals.hyperlink_color = TERMINAL_ACCENT;
-    visuals.error_fg_color = TERMINAL_ERROR;
-    visuals.selection.bg_fill = egui::Color32::from_rgb(35, 95, 75);
-    visuals.selection.stroke = egui::Stroke::new(1.0, TERMINAL_TEXT);
-    visuals.window_stroke = subtle_stroke;
-    visuals.widgets.noninteractive.bg_fill = TERMINAL_PANEL_BG;
-    visuals.widgets.noninteractive.weak_bg_fill = TERMINAL_PANEL_BG;
-    visuals.widgets.noninteractive.bg_stroke = subtle_stroke;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TERMINAL_TEXT);
-    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(30, 34, 40);
-    visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(30, 34, 40);
-    visuals.widgets.inactive.bg_stroke = subtle_stroke;
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TERMINAL_TEXT);
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(38, 44, 51);
-    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(38, 44, 51);
-    visuals.widgets.hovered.bg_stroke = active_stroke;
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TERMINAL_TEXT);
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(35, 95, 75);
-    visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(35, 95, 75);
-    visuals.widgets.active.bg_stroke = active_stroke;
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, TERMINAL_TEXT);
-    visuals.widgets.open.bg_fill = egui::Color32::from_rgb(38, 44, 51);
-    visuals.widgets.open.weak_bg_fill = egui::Color32::from_rgb(38, 44, 51);
-    visuals.widgets.open.bg_stroke = active_stroke;
-    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, TERMINAL_TEXT);
-    visuals.warn_fg_color = TERMINAL_MUTED;
-    visuals.button_frame = true;
-
-    ctx.set_visuals(visuals);
-}
-
-enum TerminalCommand {
-    Clear,
-    ChangeDirectory(PathBuf),
-    Shell(String),
-}
-
-fn parse_terminal_command(command: &str) -> TerminalCommand {
-    let command = command.trim();
-
-    if command == "clear" {
-        return TerminalCommand::Clear;
-    }
-
-    if command == "cd" {
-        return TerminalCommand::ChangeDirectory(home_dir());
-    }
-
-    if let Some(path) = command.strip_prefix("cd ") {
-        return TerminalCommand::ChangeDirectory(expand_home(path.trim()));
-    }
-
-    TerminalCommand::Shell(command.to_owned())
-}
-
-fn expand_home(path: &str) -> PathBuf {
-    if path == "~" {
-        return home_dir();
-    }
-
-    if let Some(rest) = path.strip_prefix("~/") {
-        return home_dir().join(rest);
-    }
-
-    PathBuf::from(path)
-}
-
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
-}
-
-struct OpenTab {
-    path: PathBuf,
-    title: String,
-    document: Result<Option<TextDocument>, String>,
-}
-
-fn show_document_preview(ui: &mut egui::Ui, document: Result<Option<TextDocument>, String>) {
-    match document {
-        Ok(Some(document)) if document.text.is_empty() => {
-            ui.label(egui::RichText::new("This file is empty.").italics());
-        }
-        Ok(Some(document)) => {
-            show_document(ui, &document);
-        }
-        Ok(None) => {
-            ui.label(egui::RichText::new("No text preview available.").italics());
-        }
-        Err(err) => {
-            ui.colored_label(
-                egui::Color32::from_rgb(190, 70, 70),
-                format!("Could not preview file: {err}"),
-            );
-        }
-    }
-}
-
-fn show_open_tab(ui: &mut egui::Ui, tab: &OpenTab) {
-    ui.label(egui::RichText::new(tab.path.display().to_string()).weak());
-    ui.add_space(8.0);
-
-    match &tab.document {
-        Ok(Some(document)) if document.text.is_empty() => {
-            ui.label(egui::RichText::new("This file is empty.").italics());
-        }
-        Ok(Some(document)) => {
-            show_document(ui, document);
-
-            if document.truncated {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("File truncated for display.").italics());
-            }
-        }
-        Ok(None) => {
-            ui.label(egui::RichText::new("This does not look like a text file.").italics());
-        }
-        Err(err) => {
-            ui.colored_label(
-                egui::Color32::from_rgb(190, 70, 70),
-                format!("Could not open file: {err}"),
-            );
-        }
-    }
-}
-
-fn show_document(ui: &mut egui::Ui, document: &TextDocument) {
-    match document.kind {
-        TextKind::Code(language) => show_code(ui, &document.text, language),
-        TextKind::Markdown => show_markdown(ui, &document.text),
-        TextKind::Plain => {
-            ui.add(egui::Label::new(egui::RichText::new(&document.text).monospace()).wrap());
-        }
+        self.show_hover_preview(ctx);
     }
 }
