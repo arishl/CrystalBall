@@ -30,14 +30,14 @@ pub(crate) fn show_document_preview(
         }
         Err(err) => {
             ui.colored_label(
-                egui::Color32::from_rgb(190, 70, 70),
+                egui::Color32::from_rgb(210, 210, 212),
                 format!("Could not preview file: {err}"),
             );
         }
     }
 }
 
-fn show_document(ui: &mut egui::Ui, document: &TextDocument) {
+pub(crate) fn show_document(ui: &mut egui::Ui, document: &TextDocument) {
     match document.kind {
         TextKind::Code(language) => show_code(ui, &document.text, language),
         TextKind::Markdown => show_markdown(ui, &document.text),

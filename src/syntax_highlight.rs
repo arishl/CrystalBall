@@ -2,14 +2,14 @@ use eframe::egui;
 
 use crate::file_content::CodeLanguage;
 
-const CODE_BG: egui::Color32 = egui::Color32::from_rgb(18, 20, 24);
-const DEFAULT: egui::Color32 = egui::Color32::from_rgb(220, 225, 232);
-const COMMENT: egui::Color32 = egui::Color32::from_rgb(112, 123, 134);
-const KEYWORD: egui::Color32 = egui::Color32::from_rgb(205, 145, 235);
-const STRING: egui::Color32 = egui::Color32::from_rgb(140, 205, 150);
-const NUMBER: egui::Color32 = egui::Color32::from_rgb(230, 170, 115);
-const TYPE: egui::Color32 = egui::Color32::from_rgb(105, 180, 235);
-const PREPROCESSOR: egui::Color32 = egui::Color32::from_rgb(235, 205, 130);
+const CODE_BG: egui::Color32 = egui::Color32::from_rgb(8, 8, 9);
+const DEFAULT: egui::Color32 = egui::Color32::from_rgb(238, 238, 239);
+const COMMENT: egui::Color32 = egui::Color32::from_rgb(125, 135, 145);
+const KEYWORD: egui::Color32 = egui::Color32::from_rgb(220, 150, 255);
+const STRING: egui::Color32 = egui::Color32::from_rgb(150, 215, 170);
+const NUMBER: egui::Color32 = egui::Color32::from_rgb(245, 185, 125);
+const TYPE: egui::Color32 = egui::Color32::from_rgb(125, 195, 255);
+const PREPROCESSOR: egui::Color32 = egui::Color32::from_rgb(245, 215, 140);
 
 pub fn show_code(ui: &mut egui::Ui, code: &str, language: CodeLanguage) {
     egui::Frame::default()

@@ -38,8 +38,8 @@ pub(crate) fn show_hover_preview(
         .fixed_pos(egui::pos2(x, y))
         .show(ctx, |ui| {
             egui::Frame::default()
-                .fill(egui::Color32::from_rgb(24, 27, 32))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 62, 72)))
+                .fill(egui::Color32::from_rgb(18, 18, 20))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 54, 58)))
                 .corner_radius(8)
                 .inner_margin(10)
                 .show(ui, |ui| {

@@ -3,8 +3,11 @@ name: Build Artifacts
 on:
   workflow_dispatch:
   push:
+    branches: [ "main" ]
     tags:
       - "v*"
+  schedule:
+    - cron: "17 9 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,36 +39,71 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check for nightly code changes
+        id: changes
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --quiet HEAD~1 HEAD -- src Cargo.toml Cargo.lock; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install Linux GUI dependencies
-        if: runner.os == 'Linux'
+        if: steps.changes.outputs.should_build == 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev
 
       - name: Build release binary
+        if: steps.changes.outputs.should_build == 'true'
         run: cargo build --locked --release
 
       - name: Stage artifact
+        if: steps.changes.outputs.should_build == 'true'
         shell: bash
         run: |
           mkdir -p dist/${{ matrix.name }}
           cp target/release/${{ matrix.binary }} dist/${{ matrix.name }}/
           cp README.md dist/${{ matrix.name }}/
+          cat > dist/${{ matrix.name }}/install.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          cp CrystalBall "$HOME/.local/bin/CrystalBall"
+          chmod +x "$HOME/.local/bin/CrystalBall"
+          echo "Installed CrystalBall to $HOME/.local/bin/CrystalBall"
+          EOF
+          chmod +x dist/${{ matrix.name }}/install.sh
+          cat > dist/${{ matrix.name }}/install.ps1 <<'EOF'
+          $InstallDir = "$env:LOCALAPPDATA\CrystalBall"
+          New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+          Copy-Item ".\CrystalBall.exe" "$InstallDir\CrystalBall.exe" -Force
+          Write-Host "Installed CrystalBall to $InstallDir\CrystalBall.exe"
+          EOF
 
       - name: Package artifact
-        if: runner.os != 'Windows'
+        if: steps.changes.outputs.should_build == 'true' && runner.os != 'Windows'
         shell: bash
         run: |
           tar -C dist/${{ matrix.name }} -czf dist/${{ matrix.archive }} .
 
       - name: Package artifact
-        if: runner.os == 'Windows'
+        if: steps.changes.outputs.should_build == 'true' && runner.os == 'Windows'
         shell: pwsh
         run: |
           Compress-Archive -Path dist/${{ matrix.name }}/* -DestinationPath dist/${{ matrix.archive }}
 
       - name: Upload downloadable build
+        if: steps.changes.outputs.should_build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}
@@ -73,7 +111,7 @@ jobs:
           if-no-files-found: error
 
       - name: Attach artifacts to GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.changes.outputs.should_build == 'true' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/${{ matrix.archive }}

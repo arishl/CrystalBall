@@ -7,12 +7,14 @@ use eframe::egui;
 
 mod editor;
 mod hover_preview;
+mod memory;
 mod preview;
 mod shell;
 mod theme;
 
 use editor::{EditorAction, OpenTab, show_editor, show_tab_strip};
 use hover_preview::PREVIEW_CLOSE_GRACE_SECONDS;
+use memory::{MemoryAction, MemoryTrail};
 use preview::HoverPreview;
 use shell::{TerminalCommand, default_shell, parse_terminal_command};
 use theme::{StatusMessage, apply_theme};
@@ -30,6 +32,11 @@ pub struct FileExplorerApp {
     selected: Option<PathBuf>,
     open_tabs: Vec<OpenTab>,
     active_tab: Option<usize>,
+    pending_close_tab: Option<usize>,
+    quick_open: QuickOpenState,
+    folder_find: FolderFindState,
+    memory_trail: MemoryTrail,
+    terminal_collapsed: bool,
     hover_preview: Option<HoverPreview>,
     preview_row_hovered: bool,
     preview_keep_until: f64,
@@ -49,6 +56,11 @@ impl Default for FileExplorerApp {
             selected: None,
             open_tabs: Vec::new(),
             active_tab: None,
+            pending_close_tab: None,
+            quick_open: QuickOpenState::default(),
+            folder_find: FolderFindState::default(),
+            memory_trail: MemoryTrail::default(),
+            terminal_collapsed: false,
             hover_preview: None,
             preview_row_hovered: false,
             preview_keep_until: 0.0,
@@ -94,6 +106,7 @@ impl FileExplorerApp {
     fn open_directory(&mut self, path: PathBuf) {
         self.current_dir = path;
         self.selected = None;
+        self.memory_trail.record_directory(&self.current_dir);
         self.refresh_entries();
     }
 
@@ -101,6 +114,7 @@ impl FileExplorerApp {
         if let Some(parent) = self.current_dir.parent() {
             self.current_dir = parent.to_path_buf();
             self.selected = None;
+            self.memory_trail.record_directory(&self.current_dir);
             self.refresh_entries();
         }
     }
@@ -115,6 +129,7 @@ impl FileExplorerApp {
     fn open_file_tab(&mut self, path: PathBuf) {
         if let Some(index) = self.open_tabs.iter().position(|tab| tab.path == path) {
             self.active_tab = Some(index);
+            self.memory_trail.record_file(&path);
             return;
         }
 
@@ -132,13 +147,23 @@ impl FileExplorerApp {
             .unwrap_or_default();
 
         self.open_tabs.push(OpenTab {
-            path,
+            path: path.clone(),
             title,
             document,
             draft,
             dirty: false,
+            find_query: String::new(),
         });
         self.active_tab = Some(self.open_tabs.len() - 1);
+        self.memory_trail.record_file(&path);
+    }
+
+    fn request_close_tab(&mut self, index: usize) {
+        if self.open_tabs.get(index).is_some_and(|tab| tab.dirty) {
+            self.pending_close_tab = Some(index);
+        } else {
+            self.close_tab(index);
+        }
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -166,6 +191,7 @@ impl FileExplorerApp {
                     document.text.clone_from(&tab.draft);
                     tab.dirty = false;
                     self.preview_cache.remove(&tab.path);
+                    self.memory_trail.record_save(&tab.path);
                     self.status = Some(StatusMessage::info(format!("Saved {}", tab.title)));
                 }
                 Err(err) => {
@@ -252,10 +278,45 @@ impl FileExplorerApp {
 
     fn show_explorer(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for entry in self.entries.clone() {
+            let root = self.current_dir.clone();
+            self.show_tree_directory(ui, &root, 0);
+        });
+    }
+
+    fn show_tree_directory(&mut self, ui: &mut egui::Ui, path: &Path, depth: usize) {
+        let Ok(read_dir) = fs::read_dir(path) else {
+            return;
+        };
+
+        let mut entries: Vec<FileEntry> = read_dir
+            .filter_map(Result::ok)
+            .filter_map(|entry| FileEntry::from_path(entry.path()))
+            .collect();
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+
+        for entry in entries {
+            if entry.is_dir {
+                let header = egui::CollapsingHeader::new(
+                    egui::RichText::new(format!("[dir]  {}", entry.name)).monospace(),
+                )
+                .id_salt(&entry.path)
+                .default_open(false);
+
+                let response = header.show(ui, |ui| {
+                    self.show_tree_directory(ui, &entry.path, depth + 1);
+                });
+
+                if response.header_response.double_clicked() {
+                    self.open_directory(entry.path.clone());
+                }
+            } else {
                 self.show_file_row(ui, entry);
             }
-        });
+        }
     }
 
     fn show_editor_panel(&mut self, ui: &mut egui::Ui) {
@@ -269,21 +330,11 @@ impl FileExplorerApp {
             return;
         }
 
-        ui.horizontal(|ui| {
-            ui.heading("Editor");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(format!("{} open", self.open_tabs.len()))
-                        .color(TERMINAL_MUTED),
-                );
-            });
-        });
-
         if let Some(index) = show_tab_strip(ui, &self.open_tabs, &mut self.active_tab) {
-            self.close_tab(index);
+            self.request_close_tab(index);
         }
 
-        ui.separator();
+        ui.add_space(4.0);
 
         if let Some(index) = self
             .active_tab
@@ -317,6 +368,7 @@ impl FileExplorerApp {
 
     fn run_terminal_command(&mut self, command: String) {
         self.terminal.push_command(&self.current_dir, &command);
+        self.memory_trail.record_command(&command);
 
         match parse_terminal_command(&command) {
             TerminalCommand::Clear => {
@@ -381,6 +433,20 @@ impl FileExplorerApp {
     }
 
     fn show_terminal_panel(&mut self, ctx: &egui::Context) {
+        if self.terminal_collapsed {
+            egui::TopBottomPanel::bottom("terminal_collapsed")
+                .exact_height(32.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("Show Terminal").clicked() {
+                            self.terminal_collapsed = false;
+                        }
+                        ui.label(egui::RichText::new("Terminal hidden").color(TERMINAL_MUTED));
+                    });
+                });
+            return;
+        }
+
         let max_height = (ctx.screen_rect().height() - 160.0).max(MIN_TERMINAL_HEIGHT);
         self.terminal_height = self.terminal_height.clamp(MIN_TERMINAL_HEIGHT, max_height);
 
@@ -388,6 +454,9 @@ impl FileExplorerApp {
             .exact_height(self.terminal_height)
             .show(ctx, |ui| {
                 self.show_terminal_drag_handle(ui, max_height);
+                if ui.button("Hide Terminal").clicked() {
+                    self.terminal_collapsed = true;
+                }
 
                 if let Some(command) = show_terminal(ui, &mut self.terminal, &self.current_dir) {
                     self.run_terminal_command(command);
@@ -434,6 +503,7 @@ impl eframe::App for FileExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_theme(ctx);
         self.preview_row_hovered = false;
+        self.handle_global_shortcuts(ctx);
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -443,6 +513,29 @@ impl eframe::App for FileExplorerApp {
 
                 if ui.button("Refresh").clicked() {
                     self.refresh_entries();
+                }
+
+                if ui.button("Quick Open").clicked() {
+                    self.quick_open.open = true;
+                    self.quick_open.refresh(&self.current_dir);
+                }
+
+                if let Some(action) = self.memory_trail.show(ui) {
+                    match action {
+                        MemoryAction::OpenFile(path) => self.open_file_tab(path),
+                        MemoryAction::OpenDirectory(path) => self.open_directory(path),
+                    }
+                }
+
+                ui.separator();
+                ui.label("Find");
+                let find_response = ui.add(
+                    egui::TextEdit::singleline(&mut self.folder_find.query)
+                        .desired_width(160.0)
+                        .hint_text("in folder"),
+                );
+                if find_response.changed() {
+                    self.folder_find.search(&self.current_dir);
                 }
 
                 ui.separator();
@@ -460,7 +553,7 @@ impl eframe::App for FileExplorerApp {
             if let Some(status) = &self.status {
                 ui.colored_label(status.color(), &status.text);
             } else {
-                ui.label("Click or double-click a text file to open it in the editor.");
+                ui.label("");
             }
         });
 
@@ -468,8 +561,7 @@ impl eframe::App for FileExplorerApp {
             .resizable(true)
             .default_width(360.0)
             .show(ctx, |ui| {
-                ui.heading("Explorer");
-                ui.label(egui::RichText::new("Folders open on double-click").color(TERMINAL_MUTED));
+                self.show_folder_find_results(ui);
                 ui.add_space(6.0);
                 self.show_explorer(ui);
             });
@@ -479,5 +571,224 @@ impl eframe::App for FileExplorerApp {
         });
 
         self.show_hover_preview(ctx);
+        self.show_quick_open(ctx);
+        self.show_dirty_close_confirmation(ctx);
     }
+}
+
+impl FileExplorerApp {
+    fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
+            self.quick_open.open = true;
+            self.quick_open.refresh(&self.current_dir);
+        }
+    }
+
+    fn show_quick_open(&mut self, ctx: &egui::Context) {
+        if !self.quick_open.open {
+            return;
+        }
+
+        egui::Window::new("Quick Open")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.quick_open.query)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Type a file name"),
+                );
+
+                if response.changed() {
+                    self.quick_open.update_matches();
+                }
+
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    self.quick_open.open = false;
+                }
+
+                ui.separator();
+                let matches = self.quick_open.matches.clone();
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        for path in matches {
+                            let label = path
+                                .strip_prefix(&self.current_dir)
+                                .unwrap_or(&path)
+                                .display()
+                                .to_string();
+                            if ui.selectable_label(false, label).clicked() {
+                                self.open_file_tab(path);
+                                self.quick_open.open = false;
+                            }
+                        }
+                    });
+            });
+    }
+
+    fn show_dirty_close_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.pending_close_tab else {
+            return;
+        };
+
+        if index >= self.open_tabs.len() {
+            self.pending_close_tab = None;
+            return;
+        }
+
+        let title = self.open_tabs[index].title.clone();
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("{title} has unsaved changes."));
+                ui.horizontal(|ui| {
+                    if ui.button("Save and Close").clicked() {
+                        self.save_tab(index);
+                        if index < self.open_tabs.len() && !self.open_tabs[index].dirty {
+                            self.close_tab(index);
+                        }
+                        self.pending_close_tab = None;
+                    }
+
+                    if ui.button("Discard").clicked() {
+                        self.close_tab(index);
+                        self.pending_close_tab = None;
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        self.pending_close_tab = None;
+                    }
+                });
+            });
+    }
+
+    fn show_folder_find_results(&mut self, ui: &mut egui::Ui) {
+        if self.folder_find.query.trim().is_empty() {
+            return;
+        }
+
+        ui.label(
+            egui::RichText::new(format!("{} folder matches", self.folder_find.results.len()))
+                .color(TERMINAL_MUTED),
+        );
+        let results = self.folder_find.results.clone();
+        egui::ScrollArea::vertical()
+            .id_salt("folder_find_results")
+            .max_height(120.0)
+            .show(ui, |ui| {
+                for path in results {
+                    let label = path
+                        .strip_prefix(&self.current_dir)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string();
+                    if ui.selectable_label(false, label).clicked() {
+                        self.open_file_tab(path);
+                    }
+                }
+            });
+        ui.separator();
+    }
+}
+
+#[derive(Default)]
+struct QuickOpenState {
+    open: bool,
+    query: String,
+    files: Vec<PathBuf>,
+    matches: Vec<PathBuf>,
+}
+
+impl QuickOpenState {
+    fn refresh(&mut self, root: &Path) {
+        self.files.clear();
+        collect_files(root, &mut self.files, 5000);
+        self.update_matches();
+    }
+
+    fn update_matches(&mut self) {
+        let query = self.query.to_lowercase();
+        self.matches = self
+            .files
+            .iter()
+            .filter(|path| {
+                query.is_empty()
+                    || path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| fuzzy_match(&query, &name.to_lowercase()))
+            })
+            .take(80)
+            .cloned()
+            .collect();
+    }
+}
+
+#[derive(Default)]
+struct FolderFindState {
+    query: String,
+    results: Vec<PathBuf>,
+}
+
+impl FolderFindState {
+    fn search(&mut self, root: &Path) {
+        self.results.clear();
+        if self.query.trim().is_empty() {
+            return;
+        }
+
+        let mut files = Vec::new();
+        collect_files(root, &mut files, 3000);
+        let needle = self.query.to_lowercase();
+        self.results = files
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_lowercase().contains(&needle))
+            })
+            .take(80)
+            .collect();
+    }
+}
+
+fn collect_files(root: &Path, files: &mut Vec<PathBuf>, limit: usize) {
+    if files.len() >= limit {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        if files.len() >= limit {
+            return;
+        }
+
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.') || name == "target")
+        {
+            continue;
+        }
+
+        if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            collect_files(&path, files, limit);
+        } else {
+            files.push(path);
+        }
+    }
+}
+
+fn fuzzy_match(query: &str, candidate: &str) -> bool {
+    let mut chars = candidate.chars();
+    query
+        .chars()
+        .all(|needle| chars.by_ref().any(|char| char == needle))
 }
