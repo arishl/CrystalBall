@@ -31,7 +31,7 @@ jobs:
           - name: macos
             os: macos-latest
             binary: CrystalBall
-            archive: CrystalBall-macos.tar.gz
+            archive: CrystalBall-macos-app.tar.gz
           - name: windows
             os: windows-latest
             binary: CrystalBall.exe
@@ -51,7 +51,7 @@ jobs:
             exit 0
           fi
 
-          if git diff --quiet HEAD~1 HEAD -- src Cargo.toml Cargo.lock; then
+          if git diff --quiet HEAD~1 HEAD -- src assets scripts Cargo.toml Cargo.lock .github/workflows; then
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
             echo "should_build=true" >> "$GITHUB_OUTPUT"
@@ -67,8 +67,8 @@ jobs:
         if: steps.changes.outputs.should_build == 'true'
         run: cargo build --locked --release
 
-      - name: Stage artifact
-        if: steps.changes.outputs.should_build == 'true'
+      - name: Stage Linux artifact
+        if: steps.changes.outputs.should_build == 'true' && runner.os == 'Linux'
         shell: bash
         run: |
           mkdir -p dist/${{ matrix.name }}
@@ -83,12 +83,46 @@ jobs:
           echo "Installed CrystalBall to $HOME/.local/bin/CrystalBall"
           EOF
           chmod +x dist/${{ matrix.name }}/install.sh
-          cat > dist/${{ matrix.name }}/install.ps1 <<'EOF'
+
+      - name: Stage macOS app bundle
+        if: steps.changes.outputs.should_build == 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          scripts/package-macos.sh target/release/${{ matrix.binary }} dist/${{ matrix.name }}
+          cp README.md dist/${{ matrix.name }}/
+          cat > dist/${{ matrix.name }}/install.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          APP_NAME="CrystalBall.app"
+          INSTALL_DIR="${1:-/Applications}"
+
+          if [[ ! -d "$INSTALL_DIR" || ! -w "$INSTALL_DIR" ]]; then
+            INSTALL_DIR="$HOME/Applications"
+          fi
+
+          mkdir -p "$INSTALL_DIR"
+          rm -rf "$INSTALL_DIR/$APP_NAME"
+          cp -R "$APP_NAME" "$INSTALL_DIR/"
+          xattr -dr com.apple.quarantine "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
+
+          echo "Installed CrystalBall to $INSTALL_DIR/$APP_NAME"
+          EOF
+          chmod +x dist/${{ matrix.name }}/install.sh
+
+      - name: Stage Windows artifact
+        if: steps.changes.outputs.should_build == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/${{ matrix.name }} | Out-Null
+          Copy-Item target/release/${{ matrix.binary }} dist/${{ matrix.name }}/
+          Copy-Item README.md dist/${{ matrix.name }}/
+          @'
           $InstallDir = "$env:LOCALAPPDATA\CrystalBall"
           New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
           Copy-Item ".\CrystalBall.exe" "$InstallDir\CrystalBall.exe" -Force
           Write-Host "Installed CrystalBall to $InstallDir\CrystalBall.exe"
-          EOF
+          '@ | Set-Content -Path dist/${{ matrix.name }}/install.ps1
 
       - name: Package artifact
         if: steps.changes.outputs.should_build == 'true' && runner.os != 'Windows'

@@ -38,6 +38,17 @@ cargo build --release
 
 The release binary is created in `target/release/`.
 
+## Build a macOS App
+
+On macOS, build a real `.app` bundle with the CrystalBall icon:
+
+```bash
+cargo build --release
+scripts/package-macos.sh
+```
+
+The app is created at `dist/macos/CrystalBall.app`.
+
 ## Downloadable Builds
 
 GitHub Actions builds release artifacts for:
@@ -46,6 +57,20 @@ GitHub Actions builds release artifacts for:
 - macOS
 - Windows
 
+The macOS artifact is `CrystalBall-macos-app.tar.gz`. It contains:
+
+- `CrystalBall.app`
+- `install.sh`
+- this README
+
+To install the macOS app after extracting the artifact:
+
+```bash
+./install.sh
+```
+
+The installer copies `CrystalBall.app` into `/Applications` when possible, or `~/Applications` when the current user cannot write to `/Applications`.
+
 The artifact workflow runs:
 
 - on demand with `workflow_dispatch`
@@ -53,7 +78,7 @@ The artifact workflow runs:
 - nightly, only when recent code changes are detected
 - on `v*` tags, attaching artifacts to the GitHub release
 
-Each artifact includes the binary, this README, and simple install scripts:
+Each Linux and Windows artifact includes the binary, this README, and a simple install script:
 
 - `install.sh` for Unix-like systems
 - `install.ps1` for Windows
