@@ -2,10 +2,13 @@ name: Build Artifacts
 
 on:
   workflow_dispatch:
+
+  # Build main only when you create a release tag like v1.0.0
   push:
-    branches: [ "main" ]
     tags:
       - "v*"
+
+  # Build nightly branch automatically every night
   schedule:
     - cron: "17 9 * * *"
 
@@ -20,6 +23,11 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+
+    # Scheduled builds should only build nightly.
+    # Tag builds build releases from main/tag.
+    if: github.event_name != 'schedule' || github.ref == 'refs/heads/nightly'
+
     strategy:
       fail-fast: false
       matrix:
@@ -41,34 +49,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-
-      - name: Check for nightly code changes
-        id: changes
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" != "schedule" ]]; then
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if git diff --quiet HEAD~1 HEAD -- src assets scripts Cargo.toml Cargo.lock .github/workflows; then
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-          fi
+          ref: ${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
 
       - name: Install Linux GUI dependencies
-        if: steps.changes.outputs.should_build == 'true' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev
 
       - name: Build release binary
-        if: steps.changes.outputs.should_build == 'true'
         run: cargo build --locked --release
 
       - name: Stage Linux artifact
-        if: steps.changes.outputs.should_build == 'true' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           mkdir -p dist/${{ matrix.name }}
@@ -85,7 +78,7 @@ jobs:
           chmod +x dist/${{ matrix.name }}/install.sh
 
       - name: Stage macOS app bundle
-        if: steps.changes.outputs.should_build == 'true' && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           scripts/package-macos.sh target/release/${{ matrix.binary }} dist/${{ matrix.name }}
@@ -111,7 +104,7 @@ jobs:
           chmod +x dist/${{ matrix.name }}/install.sh
 
       - name: Stage Windows artifact
-        if: steps.changes.outputs.should_build == 'true' && runner.os == 'Windows'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/${{ matrix.name }} | Out-Null
@@ -125,19 +118,18 @@ jobs:
           '@ | Set-Content -Path dist/${{ matrix.name }}/install.ps1
 
       - name: Package artifact
-        if: steps.changes.outputs.should_build == 'true' && runner.os != 'Windows'
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           tar -C dist/${{ matrix.name }} -czf dist/${{ matrix.archive }} .
 
       - name: Package artifact
-        if: steps.changes.outputs.should_build == 'true' && runner.os == 'Windows'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Compress-Archive -Path dist/${{ matrix.name }}/* -DestinationPath dist/${{ matrix.archive }}
 
       - name: Upload downloadable build
-        if: steps.changes.outputs.should_build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}
@@ -145,7 +137,7 @@ jobs:
           if-no-files-found: error
 
       - name: Attach artifacts to GitHub release
-        if: steps.changes.outputs.should_build == 'true' && startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/${{ matrix.archive }}
