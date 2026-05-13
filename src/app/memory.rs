@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
-use crate::terminal::TERMINAL_MUTED;
+use crate::terminal::{TERMINAL_BG, TERMINAL_MUTED};
 
 const MAX_TRAIL_ITEMS: usize = 32;
 
@@ -39,59 +39,70 @@ impl MemoryTrail {
     pub(crate) fn show(&mut self, ui: &mut egui::Ui) -> Option<MemoryAction> {
         let mut action = None;
 
-        ui.menu_button(format!("Memory ({})", self.items.len()), |ui| {
-            ui.set_min_width(320.0);
+        ui.scope(|ui| {
+            apply_memory_button_style(ui);
+            egui::menu::menu_custom_button(
+                ui,
+                egui::Button::new(
+                    egui::RichText::new(format!("Memory ({})", self.items.len())).size(13.0),
+                )
+                .frame(true),
+                |ui| {
+                    ui.set_min_width(320.0);
 
-            if self.items.is_empty() {
-                ui.label(egui::RichText::new("No memories yet.").color(TERMINAL_MUTED));
-                return;
-            }
+                    if self.items.is_empty() {
+                        ui.label(egui::RichText::new("No memories yet.").color(TERMINAL_MUTED));
+                        return;
+                    }
 
-            if ui.button("Clear all").clicked() {
-                self.items.clear();
-                ui.close_menu();
-                return;
-            }
+                    if ui.button("Clear all").clicked() {
+                        self.items.clear();
+                        ui.close_menu();
+                        return;
+                    }
 
-            ui.separator();
+                    ui.separator();
 
-            let mut remove_index = None;
-            egui::ScrollArea::vertical()
-                .id_salt("project_memory_menu")
-                .max_height(320.0)
-                .show(ui, |ui| {
-                    for index in (0..self.items.len()).rev() {
-                        ui.horizontal(|ui| {
-                            let item = &self.items[index];
-                            let can_jump = !matches!(item.target, MemoryTarget::None);
-                            let response = ui.add_enabled(
-                                can_jump,
-                                egui::Button::new(&item.label).min_size(egui::vec2(236.0, 0.0)),
-                            );
+                    let mut remove_index = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt("project_memory_menu")
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for index in (0..self.items.len()).rev() {
+                                ui.horizontal(|ui| {
+                                    let item = &self.items[index];
+                                    let can_jump = !matches!(item.target, MemoryTarget::None);
+                                    let response = ui.add_enabled(
+                                        can_jump,
+                                        egui::Button::new(&item.label)
+                                            .min_size(egui::vec2(236.0, 0.0)),
+                                    );
 
-                            if response.clicked() {
-                                action = match &item.target {
-                                    MemoryTarget::File(path) => {
-                                        Some(MemoryAction::OpenFile(path.clone()))
+                                    if response.clicked() {
+                                        action = match &item.target {
+                                            MemoryTarget::File(path) => {
+                                                Some(MemoryAction::OpenFile(path.clone()))
+                                            }
+                                            MemoryTarget::Directory(path) => {
+                                                Some(MemoryAction::OpenDirectory(path.clone()))
+                                            }
+                                            MemoryTarget::None => None,
+                                        };
+                                        ui.close_menu();
                                     }
-                                    MemoryTarget::Directory(path) => {
-                                        Some(MemoryAction::OpenDirectory(path.clone()))
-                                    }
-                                    MemoryTarget::None => None,
-                                };
-                                ui.close_menu();
-                            }
 
-                            if ui.small_button("x").on_hover_text("Remove").clicked() {
-                                remove_index = Some(index);
+                                    if ui.small_button("x").on_hover_text("Remove").clicked() {
+                                        remove_index = Some(index);
+                                    }
+                                });
                             }
                         });
-                    }
-                });
 
-            if let Some(index) = remove_index {
-                self.items.remove(index);
-            }
+                    if let Some(index) = remove_index {
+                        self.items.remove(index);
+                    }
+                },
+            );
         });
 
         action
@@ -121,6 +132,15 @@ impl MemoryTrail {
             self.items.remove(0);
         }
     }
+}
+
+fn apply_memory_button_style(ui: &mut egui::Ui) {
+    let visuals = &mut ui.style_mut().visuals;
+    visuals.widgets.inactive.bg_fill = TERMINAL_BG;
+    visuals.widgets.inactive.weak_bg_fill = TERMINAL_BG;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
 }
 
 #[derive(Clone, PartialEq, Eq)]

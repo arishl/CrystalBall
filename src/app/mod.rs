@@ -32,7 +32,7 @@ use crate::auto_update::{self, UpdateStatus};
 use crate::file_content::{TextDocument, read_preview, read_tab_document};
 use crate::file_entry::FileEntry;
 use crate::markdown_view;
-use crate::terminal::{TERMINAL_MUTED, TerminalState, show_terminal};
+use crate::terminal::{TERMINAL_BG, TERMINAL_MUTED, TerminalState, show_terminal};
 
 const DEFAULT_TERMINAL_HEIGHT: f32 = 220.0;
 const MIN_TERMINAL_HEIGHT: f32 = 120.0;
@@ -305,6 +305,22 @@ impl FileExplorerApp {
 
     fn show_explorer(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if let Some(parent) = self.current_dir.parent().map(Path::to_path_buf) {
+                let name = parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map_or_else(|| parent.display().to_string(), |name| name.to_owned());
+                self.show_file_row(
+                    ui,
+                    FileEntry {
+                        path: parent,
+                        name,
+                        is_dir: true,
+                    },
+                );
+                ui.separator();
+            }
+
             let root = self.current_dir.clone();
             self.show_tree_directory(ui, &root, 0);
         });
@@ -462,13 +478,17 @@ impl FileExplorerApp {
     fn show_terminal_panel(&mut self, ctx: &egui::Context) {
         if self.terminal_collapsed {
             egui::TopBottomPanel::bottom("terminal_collapsed")
-                .exact_height(32.0)
+                .exact_height(26.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button("Show Terminal").clicked() {
-                            self.terminal_collapsed = false;
-                        }
-                        ui.label(egui::RichText::new("Terminal hidden").color(TERMINAL_MUTED));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if terminal_toggle_button(ui, "+")
+                                .on_hover_text("Show terminal")
+                                .clicked()
+                            {
+                                self.terminal_collapsed = false;
+                            }
+                        });
                     });
                 });
             return;
@@ -481,9 +501,16 @@ impl FileExplorerApp {
             .exact_height(self.terminal_height)
             .show(ctx, |ui| {
                 self.show_terminal_drag_handle(ui, max_height);
-                if ui.button("Hide Terminal").clicked() {
-                    self.terminal_collapsed = true;
-                }
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if terminal_toggle_button(ui, "-")
+                            .on_hover_text("Hide terminal")
+                            .clicked()
+                        {
+                            self.terminal_collapsed = true;
+                        }
+                    });
+                });
 
                 if let Some(command) = show_terminal(ui, &mut self.terminal, &self.current_dir) {
                     self.run_terminal_command(command);
@@ -492,21 +519,11 @@ impl FileExplorerApp {
     }
 
     fn show_terminal_drag_handle(&mut self, ui: &mut egui::Ui, max_height: f32) {
-        let (rect, response) = ui.allocate_exact_size(
+        let (_, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), TERMINAL_DRAG_HANDLE_HEIGHT),
             egui::Sense::drag(),
         );
         let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-
-        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-        let y = rect.center().y;
-        ui.painter().line_segment(
-            [
-                egui::pos2(rect.left() + 12.0, y),
-                egui::pos2(rect.right() - 12.0, y),
-            ],
-            stroke,
-        );
 
         if response.drag_started() {
             self.terminal_drag_start_height = Some(self.terminal_height);
@@ -527,37 +544,46 @@ impl FileExplorerApp {
 
     fn show_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Up").clicked() {
+            if toolbar_button(ui, "Up", false).clicked() {
                 self.go_up();
             }
+            toolbar_separator(ui);
 
-            if ui.button("Refresh").clicked() {
+            if toolbar_button(ui, "Refresh", false).clicked() {
                 self.refresh_entries();
             }
+            toolbar_separator(ui);
 
-            if ui.button("Quick Open").clicked() {
+            if toolbar_button(ui, "Quick Open", self.quick_open.open).clicked() {
                 self.toggle_quick_open();
             }
+            toolbar_separator(ui);
 
-            if ui.button("Git Helper").clicked() {
-                self.git_helper_open = true;
+            if toolbar_button(ui, "Git Helper", self.git_helper_open).clicked() {
+                self.git_helper_open = !self.git_helper_open;
             }
+            toolbar_separator(ui);
 
-            if ui.button("Notes").clicked() {
-                self.notes.open = true;
+            if toolbar_button(ui, "Notes", self.notes.open).clicked() {
+                self.notes.open = !self.notes.open;
             }
+            toolbar_separator(ui);
 
-            ui.menu_button("New Project", |ui| {
-                if ui.button("Rust Project").clicked() {
-                    self.create_project(ProjectKind::Rust);
-                    ui.close_menu();
-                }
+            ui.scope(|ui| {
+                apply_toolbar_menu_button_style(ui);
+                egui::menu::menu_custom_button(ui, toolbar_menu_button("New Project"), |ui| {
+                    if ui.button("Rust Project").clicked() {
+                        self.create_project(ProjectKind::Rust);
+                        ui.close_menu();
+                    }
 
-                if ui.button("C++ Make Project").clicked() {
-                    self.create_project(ProjectKind::Cpp);
-                    ui.close_menu();
-                }
+                    if ui.button("C++ Make Project").clicked() {
+                        self.create_project(ProjectKind::Cpp);
+                        ui.close_menu();
+                    }
+                });
             });
+            toolbar_separator(ui);
 
             if let Some(action) = self.memory_trail.show(ui) {
                 match action {
@@ -565,8 +591,8 @@ impl FileExplorerApp {
                     MemoryAction::OpenDirectory(path) => self.open_directory(path),
                 }
             }
+            toolbar_separator(ui);
 
-            ui.separator();
             ui.label("Find");
             let find_response = ui.add(
                 egui::TextEdit::singleline(&mut self.folder_find.query)
@@ -576,14 +602,14 @@ impl FileExplorerApp {
             if find_response.changed() {
                 self.folder_find.search(&self.current_dir);
             }
+            toolbar_separator(ui);
 
-            ui.separator();
-            if ui.button("Copy Path").clicked() {
+            if toolbar_button(ui, "Copy Path", false).clicked() {
                 ui.ctx().copy_text(self.current_dir.display().to_string());
                 self.status = Some(StatusMessage::info("Copied current folder path"));
             }
+            toolbar_separator(ui);
 
-            ui.separator();
             if let Some(path) = breadcrumbs::show(ui, &self.current_dir) {
                 self.open_directory(path);
             }
@@ -757,16 +783,37 @@ impl FileExplorerApp {
             return;
         }
 
+        let mut open = self.git_helper_open;
+        let mut close = false;
         egui::Window::new("Git Helper")
-            .open(&mut self.git_helper_open)
+            .open(&mut open)
+            .title_bar(false)
             .default_width(620.0)
             .default_height(640.0)
             .resizable(true)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| markdown_view::show_markdown(ui, git_helper::GUIDE));
+                show_tool_header(
+                    ui,
+                    "Git Helper",
+                    "Common commands and safe workflows",
+                    &mut close,
+                );
+                ui.separator();
+
+                egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(12, 12, 14))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| markdown_view::show_markdown(ui, git_helper::GUIDE));
+                    });
             });
+
+        if close {
+            open = false;
+        }
+        self.git_helper_open = open;
     }
 
     fn show_notes(&mut self, ctx: &egui::Context) {
@@ -776,14 +823,27 @@ impl FileExplorerApp {
 
         let mut open = self.notes.open;
         let mut save_notes = false;
+        let mut close = false;
         egui::Window::new("Notes")
             .open(&mut open)
+            .title_bar(false)
             .default_width(560.0)
             .default_height(420.0)
             .resizable(true)
             .show(ctx, |ui| {
+                show_tool_header(
+                    ui,
+                    "Notes",
+                    "Autosaved to ~/.crystalball/notes.md",
+                    &mut close,
+                );
+                ui.separator();
+
                 let response = ui.add_sized(
-                    ui.available_size(),
+                    egui::vec2(
+                        ui.available_width(),
+                        (ui.available_height() - 22.0).max(120.0),
+                    ),
                     egui::TextEdit::multiline(&mut self.notes.text)
                         .font(egui::TextStyle::Monospace)
                         .hint_text("Write project notes here..."),
@@ -792,8 +852,19 @@ impl FileExplorerApp {
                 if response.changed() {
                     save_notes = true;
                 }
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Autosaves as you type")
+                            .small()
+                            .color(TERMINAL_MUTED),
+                    );
+                });
             });
 
+        if close {
+            open = false;
+        }
         self.notes.open = open;
 
         if save_notes {
@@ -1031,6 +1102,65 @@ fn git_status_row_color(
     } else {
         egui::Color32::from_rgba_unmultiplied(72, 72, 76, base_alpha)
     }
+}
+
+fn show_tool_header(ui: &mut egui::Ui, title: &str, subtitle: &str, close: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new(title).strong());
+            ui.label(egui::RichText::new(subtitle).small().color(TERMINAL_MUTED));
+        });
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new("x").min_size(egui::vec2(24.0, 22.0)))
+                .on_hover_text("Close")
+                .clicked()
+            {
+                *close = true;
+            }
+        });
+    });
+}
+
+fn toolbar_button<'a>(ui: &mut egui::Ui, label: &'a str, selected: bool) -> egui::Response {
+    ui.selectable_label(selected, egui::RichText::new(label).size(13.0))
+}
+
+fn toolbar_menu_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(egui::RichText::new(label).size(13.0)).frame(true)
+}
+
+fn apply_toolbar_menu_button_style(ui: &mut egui::Ui) {
+    let visuals = &mut ui.style_mut().visuals;
+    visuals.widgets.inactive.bg_fill = TERMINAL_BG;
+    visuals.widgets.inactive.weak_bg_fill = TERMINAL_BG;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
+}
+
+fn toolbar_separator(ui: &mut egui::Ui) {
+    let height = ui.spacing().interact_size.y - 8.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(6.0, ui.spacing().interact_size.y),
+        egui::Sense::hover(),
+    );
+    let x = rect.center().x;
+    let y1 = rect.center().y - height / 2.0;
+    let y2 = rect.center().y + height / 2.0;
+    ui.painter().line_segment(
+        [egui::pos2(x, y1), egui::pos2(x, y2)],
+        egui::Stroke::new(1.0, egui::Color32::WHITE),
+    );
+}
+
+fn terminal_toggle_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).monospace())
+            .frame(false)
+            .min_size(egui::vec2(18.0, 18.0)),
+    )
 }
 
 fn fuzzy_match(query: &str, candidate: &str) -> bool {

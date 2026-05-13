@@ -234,8 +234,11 @@ pub fn show_terminal(
                             terminal.update_completion_preview(cwd);
                         }
 
-                        let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
-                        if response.lost_focus() && enter_pressed {
+                        let enter_pressed = response.has_focus()
+                            && ui.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                            });
+                        if enter_pressed {
                             let command = terminal.input.trim().to_owned();
                             terminal.input.clear();
                             terminal.completion_preview.clear();
