@@ -89,14 +89,17 @@ jobs:
 
           APP_NAME="CrystalBall.app"
           INSTALL_DIR="${1:-/Applications}"
+          SOURCE_APP="$(pwd)/$APP_NAME"
 
           if [[ ! -d "$INSTALL_DIR" || ! -w "$INSTALL_DIR" ]]; then
             INSTALL_DIR="$HOME/Applications"
           fi
 
           mkdir -p "$INSTALL_DIR"
+          rm -rf "$INSTALL_DIR/$APP_NAME.new"
+          cp -R "$SOURCE_APP" "$INSTALL_DIR/$APP_NAME.new"
           rm -rf "$INSTALL_DIR/$APP_NAME"
-          cp -R "$APP_NAME" "$INSTALL_DIR/"
+          mv "$INSTALL_DIR/$APP_NAME.new" "$INSTALL_DIR/$APP_NAME"
           xattr -dr com.apple.quarantine "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
 
           echo "Installed CrystalBall to $INSTALL_DIR/$APP_NAME"
@@ -111,10 +114,35 @@ jobs:
           Copy-Item target/release/${{ matrix.binary }} dist/${{ matrix.name }}/
           Copy-Item README.md dist/${{ matrix.name }}/
           @'
+          $PidToWait = $args[0]
           $InstallDir = "$env:LOCALAPPDATA\CrystalBall"
+          $Source = (Resolve-Path ".\CrystalBall.exe").Path
+          $Target = Join-Path $InstallDir "CrystalBall.exe"
           New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-          Copy-Item ".\CrystalBall.exe" "$InstallDir\CrystalBall.exe" -Force
-          Write-Host "Installed CrystalBall to $InstallDir\CrystalBall.exe"
+
+          try {
+            Copy-Item $Source $Target -Force -ErrorAction Stop
+            Write-Host "Installed CrystalBall to $Target"
+          } catch {
+            if (-not $PidToWait) {
+              throw
+            }
+
+            $Helper = Join-Path $env:TEMP "crystalball-finish-update.ps1"
+            @"
+          `$PidToWait = $PidToWait
+          `$Source = '$Source'
+          `$Target = '$Target'
+          while (Get-Process -Id `$PidToWait -ErrorAction SilentlyContinue) {
+            Start-Sleep -Milliseconds 500
+          }
+          Copy-Item `$Source `$Target -Force
+          Start-Process `$Target
+          "@ | Set-Content -Path $Helper
+
+            Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Helper
+            Write-Host "CrystalBall update will finish after the app closes."
+          }
           '@ | Set-Content -Path dist/${{ matrix.name }}/install.ps1
 
       - name: Package artifact

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::Receiver;
 
 use eframe::egui;
 
@@ -19,6 +20,7 @@ use preview::HoverPreview;
 use shell::{TerminalCommand, default_shell, parse_terminal_command};
 use theme::{StatusMessage, apply_theme};
 
+use crate::auto_update::{self, UpdateStatus};
 use crate::file_content::{TextDocument, read_preview, read_tab_document};
 use crate::file_entry::FileEntry;
 use crate::terminal::{TERMINAL_MUTED, TerminalState, show_terminal};
@@ -45,6 +47,7 @@ pub struct FileExplorerApp {
     terminal_height: f32,
     terminal_drag_start_height: Option<f32>,
     status: Option<StatusMessage>,
+    update_status: Option<Receiver<UpdateStatus>>,
 }
 
 impl Default for FileExplorerApp {
@@ -69,6 +72,7 @@ impl Default for FileExplorerApp {
             terminal_height: DEFAULT_TERMINAL_HEIGHT,
             terminal_drag_start_height: None,
             status: None,
+            update_status: Some(auto_update::start_check()),
         };
         app.refresh_entries();
         app
@@ -503,6 +507,7 @@ impl eframe::App for FileExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_theme(ctx);
         self.preview_row_hovered = false;
+        self.poll_auto_update();
         self.handle_global_shortcuts(ctx);
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -516,8 +521,7 @@ impl eframe::App for FileExplorerApp {
                 }
 
                 if ui.button("Quick Open").clicked() {
-                    self.quick_open.open = true;
-                    self.quick_open.refresh(&self.current_dir);
+                    self.toggle_quick_open();
                 }
 
                 if let Some(action) = self.memory_trail.show(ui) {
@@ -579,8 +583,47 @@ impl eframe::App for FileExplorerApp {
 impl FileExplorerApp {
     fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
-            self.quick_open.open = true;
-            self.quick_open.refresh(&self.current_dir);
+            self.open_quick_open();
+        }
+    }
+
+    fn open_quick_open(&mut self) {
+        self.quick_open.open = true;
+        self.quick_open.hover_seen = false;
+        self.quick_open.refresh(&self.current_dir);
+    }
+
+    fn toggle_quick_open(&mut self) {
+        if self.quick_open.open {
+            self.quick_open.open = false;
+        } else {
+            self.open_quick_open();
+        }
+    }
+
+    fn poll_auto_update(&mut self) {
+        let Some(receiver) = &self.update_status else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(UpdateStatus::Installed(version)) => {
+                self.status = Some(StatusMessage::info(format!(
+                    "Updated to {version}. Restart CrystalBall to use it."
+                )));
+                self.update_status = None;
+            }
+            Ok(UpdateStatus::Skipped(_message)) => {
+                self.update_status = None;
+            }
+            Ok(UpdateStatus::Failed(message)) => {
+                self.status = Some(StatusMessage::error(format!("Update failed: {message}")));
+                self.update_status = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.update_status = None;
+            }
         }
     }
 
@@ -589,7 +632,7 @@ impl FileExplorerApp {
             return;
         }
 
-        egui::Window::new("Quick Open")
+        let response = egui::Window::new("Quick Open")
             .collapsible(false)
             .resizable(true)
             .default_width(520.0)
@@ -626,6 +669,18 @@ impl FileExplorerApp {
                         }
                     });
             });
+
+        if let Some(inner) = response {
+            let pointer_pos = ctx.pointer_hover_pos();
+            let hovering_window = pointer_pos.is_some_and(|pos| inner.response.rect.contains(pos));
+            let pointer_down = ctx.input(|input| input.pointer.any_down());
+
+            if hovering_window {
+                self.quick_open.hover_seen = true;
+            } else if self.quick_open.hover_seen && !pointer_down {
+                self.quick_open.open = false;
+            }
+        }
     }
 
     fn show_dirty_close_confirmation(&mut self, ctx: &egui::Context) {
@@ -697,6 +752,7 @@ impl FileExplorerApp {
 #[derive(Default)]
 struct QuickOpenState {
     open: bool,
+    hover_seen: bool,
     query: String,
     files: Vec<PathBuf>,
     matches: Vec<PathBuf>,

@@ -124,7 +124,12 @@ pub fn show_terminal(
 
             ui.add_space(3.0);
 
-            let prompt_height = ui.spacing().interact_size.y + 18.0;
+            let completion_preview_height = if terminal.completion_preview.is_empty() {
+                0.0
+            } else {
+                ui.spacing().interact_size.y * 2.0 + 12.0
+            };
+            let prompt_height = ui.spacing().interact_size.y + completion_preview_height + 24.0;
             let output_height = (ui.available_height() - prompt_height - 14.0).max(24.0);
 
             egui::Frame::default()
@@ -164,14 +169,14 @@ pub fn show_terminal(
                     let terminal_input_id = ui.make_persistent_id("terminal_input");
                     let terminal_has_focus =
                         ui.memory(|memory| memory.has_focus(terminal_input_id));
+                    let mut complete_requested = false;
 
                     if terminal_has_focus
                         && ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
                         })
                     {
-                        terminal.complete_input(cwd);
-                        ui.memory_mut(|memory| memory.request_focus(terminal_input_id));
+                        complete_requested = true;
                     }
 
                     if terminal_has_focus
@@ -207,6 +212,24 @@ pub fn show_terminal(
                                 .lock_focus(true),
                         );
 
+                        if response.has_focus()
+                            && ui.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                            })
+                        {
+                            complete_requested = true;
+                        }
+
+                        if terminal.input.contains('\t') {
+                            terminal.input.retain(|char| char != '\t');
+                            complete_requested = true;
+                        }
+
+                        if complete_requested {
+                            terminal.complete_input(cwd);
+                            ui.memory_mut(|memory| memory.request_focus(terminal_input_id));
+                        }
+
                         if response.changed() {
                             terminal.update_completion_preview(cwd);
                         }
@@ -228,6 +251,7 @@ pub fn show_terminal(
                     if !terminal.completion_preview.is_empty() {
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
+                            ui.set_max_height(completion_preview_height);
                             for item in terminal.completion_preview.iter().take(8) {
                                 ui.label(
                                     egui::RichText::new(item).monospace().color(TERMINAL_MUTED),

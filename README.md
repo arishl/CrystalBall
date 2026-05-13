@@ -22,6 +22,7 @@ It is designed for fast local project browsing: open folders, preview files, edi
 - Terminal path completion with Tab and a completion preview.
 - Collapsible terminal for more editing space.
 - Project Memory Trails for jumping back to recent files, folders, saves, and commands.
+- Installed builds check GitHub releases and install newer release artifacts automatically.
 - Black, gray, and white application chrome with colored syntax highlighting.
 
 ## Run Locally
@@ -74,9 +75,8 @@ The installer copies `CrystalBall.app` into `/Applications` when possible, or `~
 The artifact workflow runs:
 
 - on demand with `workflow_dispatch`
-- on pushes to `main` that change code or build files
-- nightly, only when recent code changes are detected
 - on `v*` tags, attaching artifacts to the GitHub release
+- nightly from the `nightly` branch, when that branch is the scheduled ref
 
 Each Linux and Windows artifact includes the binary, this README, and a simple install script:
 
