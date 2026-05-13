@@ -609,11 +609,15 @@ impl eframe::App for FileExplorerApp {
                 }
 
                 ui.separator();
-                ui.label(
-                    egui::RichText::new(self.current_dir.display().to_string())
-                        .monospace()
-                        .color(TERMINAL_MUTED),
-                );
+                if ui.button("Copy Path").clicked() {
+                    ui.ctx().copy_text(self.current_dir.display().to_string());
+                    self.status = Some(StatusMessage::info("Copied current folder path"));
+                }
+
+                ui.separator();
+                if let Some(path) = show_breadcrumbs(ui, &self.current_dir) {
+                    self.open_directory(path);
+                }
             });
         });
 
@@ -1026,6 +1030,62 @@ fn git_status_row_color(
     } else {
         egui::Color32::from_rgba_unmultiplied(72, 72, 76, base_alpha)
     }
+}
+
+fn show_breadcrumbs(ui: &mut egui::Ui, current_dir: &Path) -> Option<PathBuf> {
+    let mut destination = None;
+    let crumbs = breadcrumb_parts(current_dir);
+
+    egui::ScrollArea::horizontal()
+        .id_salt("current_dir_breadcrumbs")
+        .max_height(ui.spacing().interact_size.y + 6.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Path").color(TERMINAL_MUTED));
+
+                for (index, (label, path)) in crumbs.iter().enumerate() {
+                    if index > 0 {
+                        ui.label(egui::RichText::new("/").color(TERMINAL_MUTED));
+                    }
+
+                    let active = index + 1 == crumbs.len();
+                    let response = ui
+                        .selectable_label(
+                            active,
+                            egui::RichText::new(label).monospace().color(if active {
+                                ui.visuals().text_color()
+                            } else {
+                                TERMINAL_MUTED
+                            }),
+                        )
+                        .on_hover_text(path.display().to_string());
+
+                    if response.clicked() && !active {
+                        destination = Some(path.clone());
+                    }
+                }
+            });
+        });
+
+    destination
+}
+
+fn breadcrumb_parts(path: &Path) -> Vec<(String, PathBuf)> {
+    let mut parts = Vec::new();
+    let mut current = PathBuf::new();
+
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let label = component.as_os_str().to_string_lossy().into_owned();
+        parts.push((label, current.clone()));
+    }
+
+    if parts.is_empty() {
+        parts.push((path.display().to_string(), path.to_path_buf()));
+    }
+
+    parts
 }
 
 fn fuzzy_match(query: &str, candidate: &str) -> bool {
