@@ -43,6 +43,7 @@ pub struct FileExplorerApp {
     preview_row_hovered: bool,
     preview_keep_until: f64,
     preview_cache: HashMap<PathBuf, Result<Option<TextDocument>, String>>,
+    git_statuses: HashMap<PathBuf, GitFileStatus>,
     terminal: TerminalState,
     terminal_height: f32,
     terminal_drag_start_height: Option<f32>,
@@ -68,6 +69,7 @@ impl Default for FileExplorerApp {
             preview_row_hovered: false,
             preview_keep_until: 0.0,
             preview_cache: HashMap::new(),
+            git_statuses: HashMap::new(),
             terminal: TerminalState::default(),
             terminal_height: DEFAULT_TERMINAL_HEIGHT,
             terminal_drag_start_height: None,
@@ -83,6 +85,7 @@ impl FileExplorerApp {
     fn refresh_entries(&mut self) {
         self.entries.clear();
         self.preview_cache.clear();
+        self.refresh_git_statuses();
         self.status = None;
 
         match fs::read_dir(&self.current_dir) {
@@ -104,6 +107,66 @@ impl FileExplorerApp {
                     self.current_dir.display()
                 )));
             }
+        }
+    }
+
+    fn refresh_git_statuses(&mut self) {
+        self.git_statuses.clear();
+
+        let Ok(root_output) = Command::new("git")
+            .arg("-C")
+            .arg(&self.current_dir)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+        else {
+            return;
+        };
+
+        if !root_output.status.success() {
+            return;
+        }
+
+        let root = String::from_utf8_lossy(&root_output.stdout)
+            .trim()
+            .to_owned();
+        if root.is_empty() {
+            return;
+        }
+        let root = PathBuf::from(root);
+
+        let Ok(status_output) = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["status", "--porcelain=v1", "-z"])
+            .output()
+        else {
+            return;
+        };
+
+        if !status_output.status.success() {
+            return;
+        }
+
+        let mut records = status_output.stdout.split(|byte| *byte == 0).peekable();
+        while let Some(record) = records.next() {
+            if record.len() < 4 {
+                continue;
+            }
+
+            let index_status = record[0] as char;
+            let worktree_status = record[1] as char;
+            let path = String::from_utf8_lossy(&record[3..]).into_owned();
+            let status = GitFileStatus::from_porcelain(index_status, worktree_status);
+
+            if matches!(index_status, 'R' | 'C') {
+                records.next();
+            }
+
+            let Some(status) = status else {
+                continue;
+            };
+
+            self.git_statuses.insert(root.join(path), status);
         }
     }
 
@@ -194,9 +257,12 @@ impl FileExplorerApp {
                 Ok(()) => {
                     document.text.clone_from(&tab.draft);
                     tab.dirty = false;
-                    self.preview_cache.remove(&tab.path);
-                    self.memory_trail.record_save(&tab.path);
-                    self.status = Some(StatusMessage::info(format!("Saved {}", tab.title)));
+                    let saved_path = tab.path.clone();
+                    let saved_title = tab.title.clone();
+                    self.preview_cache.remove(&saved_path);
+                    self.memory_trail.record_save(&saved_path);
+                    self.status = Some(StatusMessage::info(format!("Saved {saved_title}")));
+                    self.refresh_git_statuses();
                 }
                 Err(err) => {
                     self.status = Some(StatusMessage::error(format!(
@@ -237,14 +303,14 @@ impl FileExplorerApp {
 
     fn show_file_row(&mut self, ui: &mut egui::Ui, entry: FileEntry) {
         let selected = self.selected.as_ref() == Some(&entry.path);
+        let git_status = self.git_statuses.get(&entry.path).copied();
         let label = if entry.is_dir {
             format!("[dir]  {}", entry.name)
         } else {
             format!("[file] {}", entry.name)
         };
-        let response = ui
-            .selectable_label(selected, egui::RichText::new(label).monospace())
-            .on_hover_cursor(if entry.is_dir {
+        let response =
+            show_git_status_row(ui, label, selected, git_status).on_hover_cursor(if entry.is_dir {
                 egui::CursorIcon::PointingHand
             } else {
                 egui::CursorIcon::Text
@@ -811,6 +877,61 @@ impl FolderFindState {
     }
 }
 
+#[derive(Clone, Copy)]
+enum GitFileStatus {
+    Modified,
+    Added,
+    Deleted,
+    Untracked,
+    Conflicted,
+}
+
+impl GitFileStatus {
+    fn from_porcelain(index_status: char, worktree_status: char) -> Option<Self> {
+        if index_status == '?' && worktree_status == '?' {
+            return Some(Self::Untracked);
+        }
+
+        if matches!(index_status, 'U' | 'A' | 'D') && matches!(worktree_status, 'U' | 'A' | 'D') {
+            return Some(Self::Conflicted);
+        }
+
+        if index_status == 'D' || worktree_status == 'D' {
+            return Some(Self::Deleted);
+        }
+
+        if matches!(index_status, 'A' | 'R' | 'C') {
+            return Some(Self::Added);
+        }
+
+        if matches!(index_status, 'M' | 'T') || matches!(worktree_status, 'M' | 'T') {
+            return Some(Self::Modified);
+        }
+
+        None
+    }
+
+    fn tint(self) -> egui::Color32 {
+        match self {
+            Self::Modified => egui::Color32::from_rgba_unmultiplied(182, 142, 46, 46),
+            Self::Added => egui::Color32::from_rgba_unmultiplied(54, 150, 92, 46),
+            Self::Deleted => egui::Color32::from_rgba_unmultiplied(184, 64, 72, 54),
+            Self::Untracked => egui::Color32::from_rgba_unmultiplied(80, 132, 196, 42),
+            Self::Conflicted => egui::Color32::from_rgba_unmultiplied(174, 70, 190, 64),
+        }
+    }
+
+    fn text_color(self) -> egui::Color32 {
+        match self {
+            Self::Modified => egui::Color32::from_rgb(238, 214, 154),
+            Self::Added => egui::Color32::from_rgb(174, 232, 196),
+            Self::Deleted => egui::Color32::from_rgb(248, 184, 188),
+            Self::Untracked => egui::Color32::from_rgb(176, 210, 248),
+            Self::Conflicted => egui::Color32::from_rgb(238, 188, 248),
+        }
+    }
+}
+
 fn collect_files(root: &Path, files: &mut Vec<PathBuf>, limit: usize) {
     if files.len() >= limit {
         return;
@@ -839,6 +960,71 @@ fn collect_files(root: &Path, files: &mut Vec<PathBuf>, limit: usize) {
         } else {
             files.push(path);
         }
+    }
+}
+
+fn show_git_status_row(
+    ui: &mut egui::Ui,
+    label: String,
+    selected: bool,
+    git_status: Option<GitFileStatus>,
+) -> egui::Response {
+    let text = egui::RichText::new(label).monospace();
+    let height = ui.spacing().interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+
+    if ui.is_rect_visible(rect) {
+        let fill = git_status_row_color(selected, git_status, response.hovered());
+        if fill != egui::Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect.expand(1.0), 2.0, fill);
+        }
+
+        let text_color = git_status
+            .map(GitFileStatus::text_color)
+            .unwrap_or_else(|| ui.visuals().text_color());
+        let text_pos = egui::pos2(rect.left() + 4.0, rect.center().y - height * 0.34);
+        ui.painter().text(
+            text_pos,
+            egui::Align2::LEFT_TOP,
+            text.text(),
+            egui::TextStyle::Monospace.resolve(ui.style()),
+            text_color,
+        );
+    }
+
+    response
+}
+
+fn git_status_row_color(
+    selected: bool,
+    git_status: Option<GitFileStatus>,
+    hovered: bool,
+) -> egui::Color32 {
+    let base_alpha = if selected {
+        72
+    } else if hovered {
+        42
+    } else {
+        0
+    };
+
+    if let Some(status) = git_status {
+        let tint = status.tint();
+        return egui::Color32::from_rgba_unmultiplied(
+            tint.r(),
+            tint.g(),
+            tint.b(),
+            tint.a().saturating_add(base_alpha / 2),
+        );
+    }
+
+    if base_alpha == 0 {
+        egui::Color32::TRANSPARENT
+    } else {
+        egui::Color32::from_rgba_unmultiplied(72, 72, 76, base_alpha)
     }
 }
 
