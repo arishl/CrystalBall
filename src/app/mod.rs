@@ -6,28 +6,41 @@ use std::sync::mpsc::Receiver;
 
 use eframe::egui;
 
+mod breadcrumbs;
 mod editor;
+mod git_helper;
+mod git_status;
 mod hover_preview;
 mod memory;
+mod notes;
 mod preview;
+mod project_templates;
 mod shell;
 mod theme;
 
 use editor::{EditorAction, OpenTab, show_editor, show_tab_strip};
+use git_status::FileStatus;
 use hover_preview::PREVIEW_CLOSE_GRACE_SECONDS;
 use memory::{MemoryAction, MemoryTrail};
+use notes::NotesState;
 use preview::HoverPreview;
+use project_templates::ProjectKind;
 use shell::{TerminalCommand, default_shell, parse_terminal_command};
 use theme::{StatusMessage, apply_theme};
 
 use crate::auto_update::{self, UpdateStatus};
 use crate::file_content::{TextDocument, read_preview, read_tab_document};
 use crate::file_entry::FileEntry;
+use crate::markdown_view;
 use crate::terminal::{TERMINAL_MUTED, TerminalState, show_terminal};
 
 const DEFAULT_TERMINAL_HEIGHT: f32 = 220.0;
 const MIN_TERMINAL_HEIGHT: f32 = 120.0;
 const TERMINAL_DRAG_HANDLE_HEIGHT: f32 = 10.0;
+const QUICK_OPEN_FILE_LIMIT: usize = 5_000;
+const FOLDER_FIND_FILE_LIMIT: usize = 3_000;
+const MAX_SEARCH_RESULTS: usize = 80;
+
 pub struct FileExplorerApp {
     current_dir: PathBuf,
     entries: Vec<FileEntry>,
@@ -37,13 +50,15 @@ pub struct FileExplorerApp {
     pending_close_tab: Option<usize>,
     quick_open: QuickOpenState,
     folder_find: FolderFindState,
+    notes: NotesState,
+    git_helper_open: bool,
     memory_trail: MemoryTrail,
     terminal_collapsed: bool,
     hover_preview: Option<HoverPreview>,
     preview_row_hovered: bool,
     preview_keep_until: f64,
     preview_cache: HashMap<PathBuf, Result<Option<TextDocument>, String>>,
-    git_statuses: HashMap<PathBuf, GitFileStatus>,
+    git_statuses: HashMap<PathBuf, FileStatus>,
     terminal: TerminalState,
     terminal_height: f32,
     terminal_drag_start_height: Option<f32>,
@@ -63,6 +78,8 @@ impl Default for FileExplorerApp {
             pending_close_tab: None,
             quick_open: QuickOpenState::default(),
             folder_find: FolderFindState::default(),
+            notes: NotesState::load(),
+            git_helper_open: false,
             memory_trail: MemoryTrail::default(),
             terminal_collapsed: false,
             hover_preview: None,
@@ -85,7 +102,7 @@ impl FileExplorerApp {
     fn refresh_entries(&mut self) {
         self.entries.clear();
         self.preview_cache.clear();
-        self.refresh_git_statuses();
+        self.git_statuses = git_status::read_statuses(&self.current_dir);
         self.status = None;
 
         match fs::read_dir(&self.current_dir) {
@@ -107,66 +124,6 @@ impl FileExplorerApp {
                     self.current_dir.display()
                 )));
             }
-        }
-    }
-
-    fn refresh_git_statuses(&mut self) {
-        self.git_statuses.clear();
-
-        let Ok(root_output) = Command::new("git")
-            .arg("-C")
-            .arg(&self.current_dir)
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-        else {
-            return;
-        };
-
-        if !root_output.status.success() {
-            return;
-        }
-
-        let root = String::from_utf8_lossy(&root_output.stdout)
-            .trim()
-            .to_owned();
-        if root.is_empty() {
-            return;
-        }
-        let root = PathBuf::from(root);
-
-        let Ok(status_output) = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["status", "--porcelain=v1", "-z"])
-            .output()
-        else {
-            return;
-        };
-
-        if !status_output.status.success() {
-            return;
-        }
-
-        let mut records = status_output.stdout.split(|byte| *byte == 0).peekable();
-        while let Some(record) = records.next() {
-            if record.len() < 4 {
-                continue;
-            }
-
-            let index_status = record[0] as char;
-            let worktree_status = record[1] as char;
-            let path = String::from_utf8_lossy(&record[3..]).into_owned();
-            let status = GitFileStatus::from_porcelain(index_status, worktree_status);
-
-            if matches!(index_status, 'R' | 'C') {
-                records.next();
-            }
-
-            let Some(status) = status else {
-                continue;
-            };
-
-            self.git_statuses.insert(root.join(path), status);
         }
     }
 
@@ -262,7 +219,7 @@ impl FileExplorerApp {
                     self.preview_cache.remove(&saved_path);
                     self.memory_trail.record_save(&saved_path);
                     self.status = Some(StatusMessage::info(format!("Saved {saved_title}")));
-                    self.refresh_git_statuses();
+                    self.git_statuses = git_status::read_statuses(&self.current_dir);
                 }
                 Err(err) => {
                     self.status = Some(StatusMessage::error(format!(
@@ -567,6 +524,89 @@ impl FileExplorerApp {
             self.terminal_drag_start_height = None;
         }
     }
+
+    fn show_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("Up").clicked() {
+                self.go_up();
+            }
+
+            if ui.button("Refresh").clicked() {
+                self.refresh_entries();
+            }
+
+            if ui.button("Quick Open").clicked() {
+                self.toggle_quick_open();
+            }
+
+            if ui.button("Git Helper").clicked() {
+                self.git_helper_open = true;
+            }
+
+            if ui.button("Notes").clicked() {
+                self.notes.open = true;
+            }
+
+            ui.menu_button("New Project", |ui| {
+                if ui.button("Rust Project").clicked() {
+                    self.create_project(ProjectKind::Rust);
+                    ui.close_menu();
+                }
+
+                if ui.button("C++ Make Project").clicked() {
+                    self.create_project(ProjectKind::Cpp);
+                    ui.close_menu();
+                }
+            });
+
+            if let Some(action) = self.memory_trail.show(ui) {
+                match action {
+                    MemoryAction::OpenFile(path) => self.open_file_tab(path),
+                    MemoryAction::OpenDirectory(path) => self.open_directory(path),
+                }
+            }
+
+            ui.separator();
+            ui.label("Find");
+            let find_response = ui.add(
+                egui::TextEdit::singleline(&mut self.folder_find.query)
+                    .desired_width(160.0)
+                    .hint_text("in folder"),
+            );
+            if find_response.changed() {
+                self.folder_find.search(&self.current_dir);
+            }
+
+            ui.separator();
+            if ui.button("Copy Path").clicked() {
+                ui.ctx().copy_text(self.current_dir.display().to_string());
+                self.status = Some(StatusMessage::info("Copied current folder path"));
+            }
+
+            ui.separator();
+            if let Some(path) = breadcrumbs::show(ui, &self.current_dir) {
+                self.open_directory(path);
+            }
+        });
+    }
+
+    fn create_project(&mut self, kind: ProjectKind) {
+        let label = kind.label();
+        match project_templates::create_project(&self.current_dir, kind) {
+            Ok(path) => {
+                self.status = Some(StatusMessage::info(format!(
+                    "Created {label} project at {}",
+                    path.display()
+                )));
+                self.refresh_entries();
+            }
+            Err(err) => {
+                self.status = Some(StatusMessage::error(format!(
+                    "Could not create {label} project: {err}"
+                )));
+            }
+        }
+    }
 }
 
 impl eframe::App for FileExplorerApp {
@@ -576,50 +616,7 @@ impl eframe::App for FileExplorerApp {
         self.poll_auto_update();
         self.handle_global_shortcuts(ctx);
 
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Up").clicked() {
-                    self.go_up();
-                }
-
-                if ui.button("Refresh").clicked() {
-                    self.refresh_entries();
-                }
-
-                if ui.button("Quick Open").clicked() {
-                    self.toggle_quick_open();
-                }
-
-                if let Some(action) = self.memory_trail.show(ui) {
-                    match action {
-                        MemoryAction::OpenFile(path) => self.open_file_tab(path),
-                        MemoryAction::OpenDirectory(path) => self.open_directory(path),
-                    }
-                }
-
-                ui.separator();
-                ui.label("Find");
-                let find_response = ui.add(
-                    egui::TextEdit::singleline(&mut self.folder_find.query)
-                        .desired_width(160.0)
-                        .hint_text("in folder"),
-                );
-                if find_response.changed() {
-                    self.folder_find.search(&self.current_dir);
-                }
-
-                ui.separator();
-                if ui.button("Copy Path").clicked() {
-                    ui.ctx().copy_text(self.current_dir.display().to_string());
-                    self.status = Some(StatusMessage::info("Copied current folder path"));
-                }
-
-                ui.separator();
-                if let Some(path) = show_breadcrumbs(ui, &self.current_dir) {
-                    self.open_directory(path);
-                }
-            });
-        });
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| self.show_toolbar(ui));
 
         self.show_terminal_panel(ctx);
 
@@ -646,6 +643,8 @@ impl eframe::App for FileExplorerApp {
 
         self.show_hover_preview(ctx);
         self.show_quick_open(ctx);
+        self.show_git_helper(ctx);
+        self.show_notes(ctx);
         self.show_dirty_close_confirmation(ctx);
     }
 }
@@ -753,6 +752,63 @@ impl FileExplorerApp {
         }
     }
 
+    fn show_git_helper(&mut self, ctx: &egui::Context) {
+        if !self.git_helper_open {
+            return;
+        }
+
+        egui::Window::new("Git Helper")
+            .open(&mut self.git_helper_open)
+            .default_width(620.0)
+            .default_height(640.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| markdown_view::show_markdown(ui, git_helper::GUIDE));
+            });
+    }
+
+    fn show_notes(&mut self, ctx: &egui::Context) {
+        if !self.notes.open {
+            return;
+        }
+
+        let mut open = self.notes.open;
+        let mut save_notes = false;
+        egui::Window::new("Notes")
+            .open(&mut open)
+            .default_width(560.0)
+            .default_height(420.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                let response = ui.add_sized(
+                    ui.available_size(),
+                    egui::TextEdit::multiline(&mut self.notes.text)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("Write project notes here..."),
+                );
+
+                if response.changed() {
+                    save_notes = true;
+                }
+            });
+
+        self.notes.open = open;
+
+        if save_notes {
+            match self.notes.save() {
+                Ok(()) => {
+                    self.status = Some(StatusMessage::info("Notes saved"));
+                }
+                Err(err) => {
+                    self.status =
+                        Some(StatusMessage::error(format!("Could not save notes: {err}")));
+                }
+            }
+        }
+    }
+
     fn show_dirty_close_confirmation(&mut self, ctx: &egui::Context) {
         let Some(index) = self.pending_close_tab else {
             return;
@@ -831,7 +887,7 @@ struct QuickOpenState {
 impl QuickOpenState {
     fn refresh(&mut self, root: &Path) {
         self.files.clear();
-        collect_files(root, &mut self.files, 5000);
+        collect_files(root, &mut self.files, QUICK_OPEN_FILE_LIMIT);
         self.update_matches();
     }
 
@@ -847,7 +903,7 @@ impl QuickOpenState {
                         .and_then(|name| name.to_str())
                         .is_some_and(|name| fuzzy_match(&query, &name.to_lowercase()))
             })
-            .take(80)
+            .take(MAX_SEARCH_RESULTS)
             .cloned()
             .collect();
     }
@@ -867,7 +923,7 @@ impl FolderFindState {
         }
 
         let mut files = Vec::new();
-        collect_files(root, &mut files, 3000);
+        collect_files(root, &mut files, FOLDER_FIND_FILE_LIMIT);
         let needle = self.query.to_lowercase();
         self.results = files
             .into_iter()
@@ -876,63 +932,8 @@ impl FolderFindState {
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.to_lowercase().contains(&needle))
             })
-            .take(80)
+            .take(MAX_SEARCH_RESULTS)
             .collect();
-    }
-}
-
-#[derive(Clone, Copy)]
-enum GitFileStatus {
-    Modified,
-    Added,
-    Deleted,
-    Untracked,
-    Conflicted,
-}
-
-impl GitFileStatus {
-    fn from_porcelain(index_status: char, worktree_status: char) -> Option<Self> {
-        if index_status == '?' && worktree_status == '?' {
-            return Some(Self::Untracked);
-        }
-
-        if matches!(index_status, 'U' | 'A' | 'D') && matches!(worktree_status, 'U' | 'A' | 'D') {
-            return Some(Self::Conflicted);
-        }
-
-        if index_status == 'D' || worktree_status == 'D' {
-            return Some(Self::Deleted);
-        }
-
-        if matches!(index_status, 'A' | 'R' | 'C') {
-            return Some(Self::Added);
-        }
-
-        if matches!(index_status, 'M' | 'T') || matches!(worktree_status, 'M' | 'T') {
-            return Some(Self::Modified);
-        }
-
-        None
-    }
-
-    fn tint(self) -> egui::Color32 {
-        match self {
-            Self::Modified => egui::Color32::from_rgba_unmultiplied(182, 142, 46, 46),
-            Self::Added => egui::Color32::from_rgba_unmultiplied(54, 150, 92, 46),
-            Self::Deleted => egui::Color32::from_rgba_unmultiplied(184, 64, 72, 54),
-            Self::Untracked => egui::Color32::from_rgba_unmultiplied(80, 132, 196, 42),
-            Self::Conflicted => egui::Color32::from_rgba_unmultiplied(174, 70, 190, 64),
-        }
-    }
-
-    fn text_color(self) -> egui::Color32 {
-        match self {
-            Self::Modified => egui::Color32::from_rgb(238, 214, 154),
-            Self::Added => egui::Color32::from_rgb(174, 232, 196),
-            Self::Deleted => egui::Color32::from_rgb(248, 184, 188),
-            Self::Untracked => egui::Color32::from_rgb(176, 210, 248),
-            Self::Conflicted => egui::Color32::from_rgb(238, 188, 248),
-        }
     }
 }
 
@@ -971,7 +972,7 @@ fn show_git_status_row(
     ui: &mut egui::Ui,
     label: String,
     selected: bool,
-    git_status: Option<GitFileStatus>,
+    git_status: Option<FileStatus>,
 ) -> egui::Response {
     let text = egui::RichText::new(label).monospace();
     let height = ui.spacing().interact_size.y;
@@ -987,7 +988,7 @@ fn show_git_status_row(
         }
 
         let text_color = git_status
-            .map(GitFileStatus::text_color)
+            .map(FileStatus::text_color)
             .unwrap_or_else(|| ui.visuals().text_color());
         let text_pos = egui::pos2(rect.left() + 4.0, rect.center().y - height * 0.34);
         ui.painter().text(
@@ -1004,7 +1005,7 @@ fn show_git_status_row(
 
 fn git_status_row_color(
     selected: bool,
-    git_status: Option<GitFileStatus>,
+    git_status: Option<FileStatus>,
     hovered: bool,
 ) -> egui::Color32 {
     let base_alpha = if selected {
@@ -1030,62 +1031,6 @@ fn git_status_row_color(
     } else {
         egui::Color32::from_rgba_unmultiplied(72, 72, 76, base_alpha)
     }
-}
-
-fn show_breadcrumbs(ui: &mut egui::Ui, current_dir: &Path) -> Option<PathBuf> {
-    let mut destination = None;
-    let crumbs = breadcrumb_parts(current_dir);
-
-    egui::ScrollArea::horizontal()
-        .id_salt("current_dir_breadcrumbs")
-        .max_height(ui.spacing().interact_size.y + 6.0)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Path").color(TERMINAL_MUTED));
-
-                for (index, (label, path)) in crumbs.iter().enumerate() {
-                    if index > 0 {
-                        ui.label(egui::RichText::new("/").color(TERMINAL_MUTED));
-                    }
-
-                    let active = index + 1 == crumbs.len();
-                    let response = ui
-                        .selectable_label(
-                            active,
-                            egui::RichText::new(label).monospace().color(if active {
-                                ui.visuals().text_color()
-                            } else {
-                                TERMINAL_MUTED
-                            }),
-                        )
-                        .on_hover_text(path.display().to_string());
-
-                    if response.clicked() && !active {
-                        destination = Some(path.clone());
-                    }
-                }
-            });
-        });
-
-    destination
-}
-
-fn breadcrumb_parts(path: &Path) -> Vec<(String, PathBuf)> {
-    let mut parts = Vec::new();
-    let mut current = PathBuf::new();
-
-    for component in path.components() {
-        current.push(component.as_os_str());
-        let label = component.as_os_str().to_string_lossy().into_owned();
-        parts.push((label, current.clone()));
-    }
-
-    if parts.is_empty() {
-        parts.push((path.display().to_string(), path.to_path_buf()));
-    }
-
-    parts
 }
 
 fn fuzzy_match(query: &str, candidate: &str) -> bool {

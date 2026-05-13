@@ -6,8 +6,6 @@ pub(crate) enum TerminalCommand {
     Shell(String),
 }
 
-
-
 pub(crate) fn parse_terminal_command(command: &str) -> TerminalCommand {
     let command = command.trim();
 
