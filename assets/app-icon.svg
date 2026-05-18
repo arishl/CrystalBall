@@ -1,35 +1,41 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" rx="160" fill="#111"/>
-
-  <!-- glass -->
-  <circle cx="512" cy="420" r="278" fill="#e8e0c8" stroke="#f7f0d8" stroke-width="14"/>
-
-  <!-- simple retro shadow -->
-  <path d="M350 545c70 62 190 72 270 18"
-        fill="none"
-        stroke="#6f6a5d"
-        stroke-width="22"
-        stroke-linecap="round"
+  <rect width="1024" height="1024" rx="170" fill="#24103c"/>
+  <path d="M64 224h896M64 384h896M64 544h896M64 704h896"
+        stroke="#160723"
+        stroke-width="24"
         opacity=".45"/>
-
-  <!-- highlight -->
-  <path d="M382 282c46-58 112-86 190-82"
+  <rect x="44" y="44" width="936" height="936" rx="132"
         fill="none"
-        stroke="#fff7df"
-        stroke-width="34"
-        stroke-linecap="round"/>
+        stroke="#f4cf62"
+        stroke-width="26"/>
 
-  <!-- base -->
-  <path d="M342 732h340l66 134H276z"
-        fill="#2b2a27"
-        stroke="#f7f0d8"
-        stroke-width="12"
+  <path d="M222 124 254 198 330 230 254 262 222 338 190 262 114 230 190 198Z"
+        fill="#ffe37a"/>
+  <path d="M800 152 822 204 876 226 822 248 800 302 778 248 724 226 778 204Z"
+        fill="#ffd15a"/>
+  <path d="M702 676 716 708 750 722 716 736 702 770 688 736 654 722 688 708Z"
+        fill="#fff0a2"/>
+
+  <circle cx="512" cy="428" r="254" fill="#8e4bc5" stroke="#ffe9a3" stroke-width="30"/>
+  <path d="M374 286c44-48 104-72 178-70"
+        fill="none"
+        stroke="#fff6cf"
+        stroke-width="42"
+        stroke-linecap="round"/>
+  <path d="M350 548c82 58 210 62 304 8"
+        fill="none"
+        stroke="#321049"
+        stroke-width="30"
+        stroke-linecap="round"
+        opacity=".7"/>
+
+  <path d="M342 708h340l72 144H270z"
+        fill="#39204e"
+        stroke="#f4cf62"
+        stroke-width="28"
         stroke-linejoin="round"/>
-
-  <!-- base groove -->
-  <path d="M348 816h328"
-        stroke="#8f846f"
-        stroke-width="18"
+  <path d="M360 804h304"
+        stroke="#b98038"
+        stroke-width="24"
         stroke-linecap="round"/>
-  
 </svg>

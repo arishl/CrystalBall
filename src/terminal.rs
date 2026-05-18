@@ -170,6 +170,7 @@ pub fn show_terminal(
                     let terminal_has_focus =
                         ui.memory(|memory| memory.has_focus(terminal_input_id));
                     let mut complete_requested = false;
+                    let mut submit_requested = false;
 
                     if terminal_has_focus
                         && ui.input_mut(|input| {
@@ -177,6 +178,14 @@ pub fn show_terminal(
                         })
                     {
                         complete_requested = true;
+                    }
+
+                    if terminal_has_focus
+                        && ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                        })
+                    {
+                        submit_requested = true;
                     }
 
                     if terminal_has_focus
@@ -212,14 +221,6 @@ pub fn show_terminal(
                                 .lock_focus(true),
                         );
 
-                        if response.has_focus()
-                            && ui.input_mut(|input| {
-                                input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
-                            })
-                        {
-                            complete_requested = true;
-                        }
-
                         if terminal.input.contains('\t') {
                             terminal.input.retain(|char| char != '\t');
                             complete_requested = true;
@@ -234,11 +235,7 @@ pub fn show_terminal(
                             terminal.update_completion_preview(cwd);
                         }
 
-                        let enter_pressed = response.has_focus()
-                            && ui.input_mut(|input| {
-                                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                            });
-                        if enter_pressed {
+                        if submit_requested {
                             let command = terminal.input.trim().to_owned();
                             terminal.input.clear();
                             terminal.completion_preview.clear();

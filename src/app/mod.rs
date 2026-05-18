@@ -1089,10 +1089,19 @@ fn git_status_row_color(
 
     if let Some(status) = git_status {
         let tint = status.tint();
+        let (red, green, blue) = if hovered {
+            (
+                ((u16::from(tint.r()) * 2 + 126) / 3) as u8,
+                ((u16::from(tint.g()) * 2 + 68) / 3) as u8,
+                ((u16::from(tint.b()) * 2 + 176) / 3) as u8,
+            )
+        } else {
+            (tint.r(), tint.g(), tint.b())
+        };
         return egui::Color32::from_rgba_unmultiplied(
-            tint.r(),
-            tint.g(),
-            tint.b(),
+            red,
+            green,
+            blue,
             tint.a().saturating_add(base_alpha / 2),
         );
     }
@@ -1100,7 +1109,7 @@ fn git_status_row_color(
     if base_alpha == 0 {
         egui::Color32::TRANSPARENT
     } else {
-        egui::Color32::from_rgba_unmultiplied(72, 72, 76, base_alpha)
+        egui::Color32::from_rgba_unmultiplied(126, 68, 176, base_alpha)
     }
 }
 
@@ -1133,11 +1142,13 @@ fn toolbar_menu_button(label: &str) -> egui::Button<'_> {
 
 fn apply_toolbar_menu_button_style(ui: &mut egui::Ui) {
     let visuals = &mut ui.style_mut().visuals;
+    let hover_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
     visuals.widgets.inactive.bg_fill = TERMINAL_BG;
     visuals.widgets.inactive.weak_bg_fill = TERMINAL_BG;
     visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-    visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.hovered.bg_stroke = hover_stroke;
+    visuals.widgets.active.bg_stroke = hover_stroke;
+    visuals.widgets.open.bg_stroke = hover_stroke;
 }
 
 fn toolbar_separator(ui: &mut egui::Ui) {

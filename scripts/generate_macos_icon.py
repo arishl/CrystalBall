@@ -60,35 +60,80 @@ def line_alpha(x: float, y: float, x1: float, y1: float, x2: float, y2: float, w
     return max(0.0, min(1.0, (width - distance) * size))
 
 
+def triangle_contains(
+    x: float,
+    y: float,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+) -> bool:
+    def sign(p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float]) -> float:
+        return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
+
+    p = (x, y)
+    d1 = sign(p, a, b)
+    d2 = sign(p, b, c)
+    d3 = sign(p, c, a)
+    has_neg = d1 < 0 or d2 < 0 or d3 < 0
+    has_pos = d1 > 0 or d2 > 0 or d3 > 0
+    return not (has_neg and has_pos)
+
+
+def diamond_alpha(x: float, y: float, cx: float, cy: float, rx: float, ry: float, size: int) -> float:
+    distance = abs(x - cx) / rx + abs(y - cy) / ry
+    return max(0.0, min(1.0, (1.0 - distance) * size * 0.18))
+
+
 def shade_pixel(x: float, y: float, size: int) -> tuple[int, int, int, int]:
     bg_alpha = rounded_rect_alpha(x, y, size, 0.22)
-    color = (8, 8, 9, clamp(255 * bg_alpha))
+    color = (36, 16, 60, clamp(255 * bg_alpha))
 
-    base_top = y > 0.72 and abs(x - 0.5) < (0.25 + (y - 0.72) * 0.75)
-    if base_top:
-        shade = 22 + int(54 * (1.0 - abs(x - 0.5) * 2.0))
-        base = (shade, shade, shade + 4, 255)
-        color = mix(color, base, bg_alpha)
+    for center in (0.22, 0.38, 0.54, 0.70):
+        band = max(0.0, min(1.0, (0.012 - abs(y - center)) * size))
+        if band > 0:
+            color = mix(color, (22, 7, 35, color[3]), band * 0.45)
+
+    border = bg_alpha if x < 0.035 or x > 0.965 or y < 0.035 or y > 0.965 else 0.0
+    if border > 0:
+        color = mix(color, (246, 214, 109, 255), border * 0.88)
+
+    for star in (
+        (0.215, 0.225, 0.085, 0.085, (255, 227, 122, 255)),
+        (0.785, 0.225, 0.065, 0.065, (255, 209, 90, 255)),
+        (0.685, 0.705, 0.042, 0.042, (255, 240, 162, 255)),
+    ):
+        sparkle = diamond_alpha(x, y, star[0], star[1], star[2], star[3], size)
+        if sparkle > 0:
+            color = mix(color, star[4], sparkle)
 
     globe = circle_alpha(x, y, 0.5, 0.42, 0.285, size)
     if globe > 0:
-        light = max(0.0, 1.0 - math.hypot(x - 0.38, y - 0.29) / 0.45)
-        edge = math.hypot(x - 0.5, y - 0.42) / 0.285
-        gray = clamp(148 + 92 * light + 40 * max(0.0, edge - 0.72))
-        glass = (gray, gray, clamp(gray + 4), 228)
-        color = mix(color, glass, globe)
+        color = mix(color, (142, 75, 197, 235), globe)
 
     rim = abs(math.hypot(x - 0.5, y - 0.42) - 0.285)
-    if rim < 0.012:
-        color = mix(color, (252, 252, 253, 255), max(0.0, 1.0 - rim / 0.012))
+    if rim < 0.024:
+        color = mix(color, (255, 233, 163, 255), max(0.0, 1.0 - rim / 0.024))
 
-    highlight = line_alpha(x, y, 0.36, 0.29, 0.58, 0.19, 0.028, size)
+    highlight = circle_alpha(x, y, 0.40, 0.31, 0.055, size)
     if highlight > 0:
-        color = mix(color, (255, 255, 255, 255), highlight * 0.88)
+        color = mix(color, (255, 246, 207, 255), highlight * 0.92)
 
-    shadow = line_alpha(x, y, 0.35, 0.56, 0.64, 0.59, 0.018, size)
-    if shadow > 0:
-        color = mix(color, (24, 24, 27, 255), shadow * 0.35)
+    if 0.66 <= y <= 0.84:
+        top_width = 0.34
+        bottom_width = 0.48
+        t = max(0.0, min(1.0, (y - 0.66) / 0.18))
+        half_width = top_width / 2.0 + (bottom_width - top_width) * t / 2.0
+        base = max(0.0, min(1.0, (half_width - abs(x - 0.5)) * size))
+        if base > 0:
+            color = mix(color, (57, 32, 78, 255), base)
+
+    base_top = max(0.0, min(1.0, (0.014 - abs(y - 0.66)) * size))
+    if base_top > 0 and abs(x - 0.5) < 0.18:
+        color = mix(color, (246, 214, 109, 255), base_top)
+
+    groove = max(0.0, min(1.0, (0.010 - abs(y - 0.79)) * size))
+    if groove > 0 and abs(x - 0.5) < 0.30:
+        color = mix(color, (184, 128, 56, 255), groove)
 
     return color
 

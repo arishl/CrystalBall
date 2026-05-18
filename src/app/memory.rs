@@ -136,11 +136,13 @@ impl MemoryTrail {
 
 fn apply_memory_button_style(ui: &mut egui::Ui) {
     let visuals = &mut ui.style_mut().visuals;
+    let hover_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
     visuals.widgets.inactive.bg_fill = TERMINAL_BG;
     visuals.widgets.inactive.weak_bg_fill = TERMINAL_BG;
     visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-    visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.hovered.bg_stroke = hover_stroke;
+    visuals.widgets.active.bg_stroke = hover_stroke;
+    visuals.widgets.open.bg_stroke = hover_stroke;
 }
 
 #[derive(Clone, PartialEq, Eq)]
