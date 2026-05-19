@@ -1,14 +1,21 @@
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use eframe::egui;
+use egui::text::{LayoutJob, TextFormat};
 
 pub const TERMINAL_BG: egui::Color32 = egui::Color32::from_rgb(8, 8, 9);
 pub const TERMINAL_PANEL_BG: egui::Color32 = egui::Color32::from_rgb(18, 18, 20);
 pub const TERMINAL_TEXT: egui::Color32 = egui::Color32::from_rgb(238, 238, 239);
 pub const TERMINAL_MUTED: egui::Color32 = egui::Color32::from_rgb(150, 150, 154);
-pub const TERMINAL_ACCENT: egui::Color32 = egui::Color32::from_rgb(245, 245, 246);
-pub const TERMINAL_ERROR: egui::Color32 = egui::Color32::from_rgb(210, 210, 212);
+pub const TERMINAL_ACCENT: egui::Color32 = egui::Color32::from_rgb(206, 162, 255);
+pub const TERMINAL_ERROR: egui::Color32 = egui::Color32::from_rgb(255, 112, 126);
+const TERMINAL_SUCCESS: egui::Color32 = egui::Color32::from_rgb(118, 230, 162);
+const TERMINAL_WARNING: egui::Color32 = egui::Color32::from_rgb(255, 210, 104);
+const TERMINAL_BLUE: egui::Color32 = egui::Color32::from_rgb(118, 176, 255);
+const TERMINAL_VM: egui::Color32 = egui::Color32::from_rgb(255, 82, 96);
 
 #[derive(Default)]
 pub struct TerminalState {
@@ -97,9 +104,12 @@ pub fn show_terminal(
 ) -> Option<String> {
     let mut command_to_run = None;
     let full_width = ui.available_width();
+    let terminal_input_id = ui.make_persistent_id("terminal_input");
+    let environment = terminal_environment(cwd);
 
-    egui::Frame::default()
+    let terminal_response = egui::Frame::default()
         .fill(TERMINAL_PANEL_BG)
+        .stroke(environment.stroke())
         .inner_margin(egui::Margin {
             left: 6,
             right: 6,
@@ -115,6 +125,13 @@ pub fn show_terminal(
                         .strong()
                         .color(TERMINAL_TEXT),
                 );
+                if let Some(label) = environment.label() {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .monospace()
+                            .color(environment.color()),
+                    );
+                }
                 ui.label(
                     egui::RichText::new(cwd.display().to_string())
                         .monospace()
@@ -166,11 +183,11 @@ pub fn show_terminal(
                 .inner_margin(egui::Margin::symmetric(6, 4))
                 .show(ui, |ui| {
                     ui.set_width(full_width - 12.0);
-                    let terminal_input_id = ui.make_persistent_id("terminal_input");
                     let terminal_has_focus =
                         ui.memory(|memory| memory.has_focus(terminal_input_id));
                     let mut complete_requested = false;
                     let mut submit_requested = false;
+                    let mut clear_requested = false;
 
                     if terminal_has_focus
                         && ui.input_mut(|input| {
@@ -186,6 +203,16 @@ pub fn show_terminal(
                         })
                     {
                         submit_requested = true;
+                    }
+
+                    if terminal_has_focus
+                        && (ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::CTRL, egui::Key::L)
+                        }) || ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::COMMAND, egui::Key::K)
+                        }))
+                    {
+                        clear_requested = true;
                     }
 
                     if terminal_has_focus
@@ -218,6 +245,7 @@ pub fn show_terminal(
                                 .id(terminal_input_id)
                                 .desired_width(f32::INFINITY)
                                 .font(egui::TextStyle::Monospace)
+                                .hint_text("run a command")
                                 .lock_focus(true),
                         );
 
@@ -228,6 +256,11 @@ pub fn show_terminal(
 
                         if complete_requested {
                             terminal.complete_input(cwd);
+                            ui.memory_mut(|memory| memory.request_focus(terminal_input_id));
+                        }
+
+                        if clear_requested {
+                            terminal.clear();
                             ui.memory_mut(|memory| memory.request_focus(terminal_input_id));
                         }
 
@@ -253,16 +286,114 @@ pub fn show_terminal(
                         ui.horizontal_wrapped(|ui| {
                             ui.set_max_height(completion_preview_height);
                             for item in terminal.completion_preview.iter().take(8) {
-                                ui.label(
-                                    egui::RichText::new(item).monospace().color(TERMINAL_MUTED),
-                                );
+                                let color = if item.ends_with('/') {
+                                    TERMINAL_BLUE
+                                } else {
+                                    TERMINAL_MUTED
+                                };
+                                ui.label(egui::RichText::new(item).monospace().color(color));
                             }
                         });
                     }
                 });
-        });
+        })
+        .response;
+
+    if terminal_response.clicked() {
+        ui.memory_mut(|memory| memory.request_focus(terminal_input_id));
+    }
 
     command_to_run
+}
+
+#[derive(Clone, Copy)]
+enum TerminalEnvironment {
+    Normal,
+    VirtualEnv,
+    VirtualMachine,
+}
+
+impl TerminalEnvironment {
+    fn color(self) -> egui::Color32 {
+        match self {
+            Self::Normal => egui::Color32::from_rgb(54, 54, 58),
+            Self::VirtualEnv => TERMINAL_SUCCESS,
+            Self::VirtualMachine => TERMINAL_VM,
+        }
+    }
+
+    fn stroke(self) -> egui::Stroke {
+        match self {
+            Self::Normal => egui::Stroke::new(1.0, self.color()),
+            Self::VirtualEnv | Self::VirtualMachine => egui::Stroke::new(2.0, self.color()),
+        }
+    }
+
+    fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Normal => None,
+            Self::VirtualEnv => Some("[venv]"),
+            Self::VirtualMachine => Some("[vm]"),
+        }
+    }
+}
+
+fn terminal_environment(cwd: &Path) -> TerminalEnvironment {
+    if is_virtual_machine_environment() {
+        TerminalEnvironment::VirtualMachine
+    } else if is_virtualenv_environment(cwd) {
+        TerminalEnvironment::VirtualEnv
+    } else {
+        TerminalEnvironment::Normal
+    }
+}
+
+fn is_virtualenv_environment(cwd: &Path) -> bool {
+    env::var_os("VIRTUAL_ENV").is_some()
+        || env::var_os("CONDA_PREFIX").is_some()
+        || find_project_venv(cwd)
+}
+
+fn find_project_venv(cwd: &Path) -> bool {
+    for ancestor in cwd.ancestors() {
+        for name in [".venv", "venv", "env"] {
+            if ancestor.join(name).join("pyvenv.cfg").is_file() {
+                return true;
+            }
+        }
+
+        if ancestor.join("pyvenv.cfg").is_file() {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_virtual_machine_environment() -> bool {
+    static IS_VM: OnceLock<bool> = OnceLock::new();
+    *IS_VM.get_or_init(|| {
+        env::var_os("container").is_some()
+            || env::var_os("CONTAINER").is_some()
+            || env::var_os("DOCKER_CONTAINER").is_some()
+            || env::var_os("WSL_DISTRO_NAME").is_some()
+            || env::var_os("VAGRANT").is_some()
+            || env::var_os("MULTIPASS_INSTANCE").is_some()
+            || env::var_os("PARALLELS_VM").is_some()
+            || Path::new("/.dockerenv").exists()
+            || Path::new("/run/.containerenv").exists()
+            || proc_cgroup_mentions_virtualization()
+    })
+}
+
+fn proc_cgroup_mentions_virtualization() -> bool {
+    let Ok(cgroup) = fs::read_to_string("/proc/1/cgroup") else {
+        return false;
+    };
+    let cgroup = cgroup.to_ascii_lowercase();
+    ["docker", "kubepods", "containerd", "lxc", "podman"]
+        .iter()
+        .any(|needle| cgroup.contains(needle))
 }
 
 fn show_terminal_line(ui: &mut egui::Ui, line: &TerminalLine) {
@@ -273,28 +404,86 @@ fn show_terminal_line(ui: &mut egui::Ui, line: &TerminalLine) {
                     egui::RichText::new(format!("{} $", compact_path(cwd)))
                         .monospace()
                         .strong()
-                        .color(TERMINAL_ACCENT),
+                        .color(TERMINAL_SUCCESS),
                 );
                 ui.label(
                     egui::RichText::new(command)
                         .monospace()
-                        .color(TERMINAL_TEXT),
+                        .color(TERMINAL_ACCENT),
                 );
             });
         }
         TerminalLine::Output(output) => {
-            ui.add(
-                egui::Label::new(egui::RichText::new(output).monospace().color(TERMINAL_TEXT))
-                    .wrap(),
-            );
+            ui.add(egui::Label::new(ansi_layout_job(output, TERMINAL_TEXT)).wrap());
         }
         TerminalLine::Error(error) => {
-            ui.add(
-                egui::Label::new(egui::RichText::new(error).monospace().color(TERMINAL_ERROR))
-                    .wrap(),
-            );
+            ui.add(egui::Label::new(ansi_layout_job(error, TERMINAL_ERROR)).wrap());
         }
     }
+}
+
+fn ansi_layout_job(text: &str, default_color: egui::Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let mut color = default_color;
+    let mut buffer = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(char) = chars.next() {
+        if char == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            flush_ansi_buffer(&mut job, &mut buffer, color);
+
+            let mut code = String::new();
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+                code.push(next);
+            }
+            color = ansi_color(&code, default_color).unwrap_or(color);
+        } else {
+            buffer.push(char);
+        }
+    }
+
+    flush_ansi_buffer(&mut job, &mut buffer, color);
+    job
+}
+
+fn flush_ansi_buffer(job: &mut LayoutJob, buffer: &mut String, color: egui::Color32) {
+    if buffer.is_empty() {
+        return;
+    }
+
+    job.append(
+        buffer,
+        0.0,
+        TextFormat {
+            font_id: egui::TextStyle::Monospace.resolve(&egui::Style::default()),
+            color,
+            ..Default::default()
+        },
+    );
+    buffer.clear();
+}
+
+fn ansi_color(code: &str, default_color: egui::Color32) -> Option<egui::Color32> {
+    let mut color = None;
+    for part in code.split(';') {
+        color = match part {
+            "0" | "39" => Some(default_color),
+            "30" | "90" => Some(TERMINAL_MUTED),
+            "31" | "91" => Some(TERMINAL_ERROR),
+            "32" | "92" => Some(TERMINAL_SUCCESS),
+            "33" | "93" => Some(TERMINAL_WARNING),
+            "34" | "94" => Some(TERMINAL_BLUE),
+            "35" | "95" => Some(TERMINAL_ACCENT),
+            "36" | "96" => Some(egui::Color32::from_rgb(108, 224, 224)),
+            "37" | "97" => Some(TERMINAL_TEXT),
+            _ => color,
+        };
+    }
+    color
 }
 
 fn compact_path(path: &str) -> String {
@@ -375,12 +564,19 @@ fn complete_current_token(cwd: &Path, input: &str) -> CompletionResult {
 }
 
 fn current_token(input: &str) -> Option<(usize, &str)> {
-    let trimmed_end = input.trim_end();
-    if trimmed_end.is_empty() {
+    if input.is_empty() {
         return None;
     }
 
-    let token_start = trimmed_end
+    if input
+        .chars()
+        .last()
+        .is_some_and(|char| char.is_ascii_whitespace())
+    {
+        return Some((input.len(), ""));
+    }
+
+    let token_start = input
         .char_indices()
         .rev()
         .find_map(|(index, char)| {
@@ -389,7 +585,7 @@ fn current_token(input: &str) -> Option<(usize, &str)> {
         })
         .unwrap_or(0);
 
-    Some((token_start, &trimmed_end[token_start..]))
+    Some((token_start, &input[token_start..]))
 }
 
 fn split_completion_token(cwd: &Path, token: &str) -> (PathBuf, String) {
@@ -430,16 +626,30 @@ fn completion_text(
         let entry = &matches[0];
         let mut token_path = PathBuf::from(token);
         token_path.set_file_name(&entry.name);
-        let mut completed = token_path.to_string_lossy().into_owned();
+        let mut completed = escape_completion_token(&token_path.to_string_lossy());
         completed.push(if entry.is_dir { '/' } else { ' ' });
         completed
     } else {
         let mut token_path = PathBuf::from(token);
         token_path.set_file_name(prefix);
-        token_path.to_string_lossy().into_owned()
+        escape_completion_token(&token_path.to_string_lossy())
     };
 
     Some(format!("{}{}", &input[..token_start], completed_token))
+}
+
+fn escape_completion_token(token: &str) -> String {
+    token
+        .chars()
+        .flat_map(|char| {
+            if char.is_ascii_whitespace() {
+                ['\\', char]
+            } else {
+                ['\0', char]
+            }
+        })
+        .filter(|char| *char != '\0')
+        .collect()
 }
 
 fn common_prefix<'a>(values: impl Iterator<Item = &'a str>) -> String {

@@ -97,42 +97,44 @@ def shade_pixel(x: float, y: float, size: int) -> tuple[int, int, int, int]:
     if border > 0:
         color = mix(color, (246, 214, 109, 255), border * 0.88)
 
+    fx = (x - 0.5) / 0.82 + 0.5
+    fy = (y - 0.5) / 0.82 + 0.5
+
     for star in (
         (0.215, 0.225, 0.085, 0.085, (255, 227, 122, 255)),
         (0.785, 0.225, 0.065, 0.065, (255, 209, 90, 255)),
-        (0.685, 0.705, 0.042, 0.042, (255, 240, 162, 255)),
     ):
-        sparkle = diamond_alpha(x, y, star[0], star[1], star[2], star[3], size)
+        sparkle = diamond_alpha(fx, fy, star[0], star[1], star[2], star[3], size)
         if sparkle > 0:
             color = mix(color, star[4], sparkle)
 
-    globe = circle_alpha(x, y, 0.5, 0.42, 0.285, size)
+    globe = circle_alpha(fx, fy, 0.5, 0.42, 0.285, size)
     if globe > 0:
         color = mix(color, (142, 75, 197, 235), globe)
 
-    rim = abs(math.hypot(x - 0.5, y - 0.42) - 0.285)
+    rim = abs(math.hypot(fx - 0.5, fy - 0.42) - 0.285)
     if rim < 0.024:
         color = mix(color, (255, 233, 163, 255), max(0.0, 1.0 - rim / 0.024))
 
-    highlight = circle_alpha(x, y, 0.40, 0.31, 0.055, size)
+    highlight = circle_alpha(fx, fy, 0.40, 0.31, 0.055, size)
     if highlight > 0:
         color = mix(color, (255, 246, 207, 255), highlight * 0.92)
 
-    if 0.66 <= y <= 0.84:
+    if 0.66 <= fy <= 0.84:
         top_width = 0.34
         bottom_width = 0.48
-        t = max(0.0, min(1.0, (y - 0.66) / 0.18))
+        t = max(0.0, min(1.0, (fy - 0.66) / 0.18))
         half_width = top_width / 2.0 + (bottom_width - top_width) * t / 2.0
-        base = max(0.0, min(1.0, (half_width - abs(x - 0.5)) * size))
+        base = max(0.0, min(1.0, (half_width - abs(fx - 0.5)) * size))
         if base > 0:
             color = mix(color, (57, 32, 78, 255), base)
 
-    base_top = max(0.0, min(1.0, (0.014 - abs(y - 0.66)) * size))
-    if base_top > 0 and abs(x - 0.5) < 0.18:
+    base_top = max(0.0, min(1.0, (0.014 - abs(fy - 0.66)) * size))
+    if base_top > 0 and abs(fx - 0.5) < 0.18:
         color = mix(color, (246, 214, 109, 255), base_top)
 
-    groove = max(0.0, min(1.0, (0.010 - abs(y - 0.79)) * size))
-    if groove > 0 and abs(x - 0.5) < 0.30:
+    groove = max(0.0, min(1.0, (0.010 - abs(fy - 0.79)) * size))
+    if groove > 0 and abs(fx - 0.5) < 0.30:
         color = mix(color, (184, 128, 56, 255), groove)
 
     return color

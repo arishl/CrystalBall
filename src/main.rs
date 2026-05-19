@@ -94,44 +94,46 @@ fn app_icon() -> egui::IconData {
             color = mix(color, [246, 214, 109, 255], border * 0.88);
         }
 
+        let fx = (x - 0.5) / 0.82 + 0.5;
+        let fy = (y - 0.5) / 0.82 + 0.5;
+
         for (cx, cy, rx, ry, star_color) in [
             (0.215, 0.225, 0.085, 0.085, [255, 227, 122, 255]),
             (0.785, 0.225, 0.065, 0.065, [255, 209, 90, 255]),
-            (0.685, 0.705, 0.042, 0.042, [255, 240, 162, 255]),
         ] {
-            let sparkle = diamond_alpha(x, y, cx, cy, rx, ry);
+            let sparkle = diamond_alpha(fx, fy, cx, cy, rx, ry);
             if sparkle > 0.0 {
                 color = mix(color, star_color, sparkle);
             }
         }
 
-        let globe = circle_alpha(x, y, 0.5, 0.42, 0.285);
+        let globe = circle_alpha(fx, fy, 0.5, 0.42, 0.285);
         if globe > 0.0 {
             color = mix(color, [142, 75, 197, 235], globe);
         }
 
-        let rim = ((x - 0.5).hypot(y - 0.42) - 0.285).abs();
+        let rim = ((fx - 0.5).hypot(fy - 0.42) - 0.285).abs();
         if rim < 0.024 {
             color = mix(color, [255, 233, 163, 255], 1.0 - rim / 0.024);
         }
 
-        let highlight = circle_alpha(x, y, 0.40, 0.31, 0.055);
+        let highlight = circle_alpha(fx, fy, 0.40, 0.31, 0.055);
         if highlight > 0.0 {
             color = mix(color, [255, 246, 207, 255], highlight * 0.92);
         }
 
-        let base = base_alpha(x, y);
+        let base = base_alpha(fx, fy);
         if base > 0.0 {
             color = mix(color, [57, 32, 78, 255], base);
         }
 
-        let base_top = band_alpha(y, 0.66, 0.014);
-        if base_top > 0.0 && (x - 0.5).abs() < 0.18 {
+        let base_top = band_alpha(fy, 0.66, 0.014);
+        if base_top > 0.0 && (fx - 0.5).abs() < 0.18 {
             color = mix(color, [246, 214, 109, 255], base_top);
         }
 
-        let base_groove = band_alpha(y, 0.79, 0.010);
-        if base_groove > 0.0 && (x - 0.5).abs() < 0.30 {
+        let base_groove = band_alpha(fy, 0.79, 0.010);
+        if base_groove > 0.0 && (fx - 0.5).abs() < 0.30 {
             color = mix(color, [184, 128, 56, 255], base_groove);
         }
 

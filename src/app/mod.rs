@@ -444,6 +444,10 @@ impl FileExplorerApp {
                     .arg("-lc")
                     .arg(&command)
                     .current_dir(&self.current_dir)
+                    .env("TERM", "xterm-256color")
+                    .env("CLICOLOR", "1")
+                    .env("CLICOLOR_FORCE", "1")
+                    .env("FORCE_COLOR", "1")
                     .output();
 
                 match output {

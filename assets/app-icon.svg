@@ -9,33 +9,27 @@
         stroke="#f4cf62"
         stroke-width="26"/>
 
-  <path d="M222 124 254 198 330 230 254 262 222 338 190 262 114 230 190 198Z"
-        fill="#ffe37a"/>
-  <path d="M800 152 822 204 876 226 822 248 800 302 778 248 724 226 778 204Z"
-        fill="#ffd15a"/>
-  <path d="M702 676 716 708 750 722 716 736 702 770 688 736 654 722 688 708Z"
-        fill="#fff0a2"/>
+  <g transform="translate(512 512) scale(.82) translate(-512 -512)">
+    <path d="M222 124 254 198 330 230 254 262 222 338 190 262 114 230 190 198Z"
+          fill="#ffe37a"/>
+    <path d="M800 152 822 204 876 226 822 248 800 302 778 248 724 226 778 204Z"
+          fill="#ffd15a"/>
 
-  <circle cx="512" cy="428" r="254" fill="#8e4bc5" stroke="#ffe9a3" stroke-width="30"/>
-  <path d="M374 286c44-48 104-72 178-70"
-        fill="none"
-        stroke="#fff6cf"
-        stroke-width="42"
-        stroke-linecap="round"/>
-  <path d="M350 548c82 58 210 62 304 8"
-        fill="none"
-        stroke="#321049"
-        stroke-width="30"
-        stroke-linecap="round"
-        opacity=".7"/>
+    <circle cx="512" cy="428" r="254" fill="#8e4bc5" stroke="#ffe9a3" stroke-width="30"/>
+    <path d="M374 286c44-48 104-72 178-70"
+          fill="none"
+          stroke="#fff6cf"
+          stroke-width="42"
+          stroke-linecap="round"/>
 
-  <path d="M342 708h340l72 144H270z"
-        fill="#39204e"
-        stroke="#f4cf62"
-        stroke-width="28"
-        stroke-linejoin="round"/>
-  <path d="M360 804h304"
-        stroke="#b98038"
-        stroke-width="24"
-        stroke-linecap="round"/>
+    <path d="M342 708h340l72 144H270z"
+          fill="#39204e"
+          stroke="#f4cf62"
+          stroke-width="28"
+          stroke-linejoin="round"/>
+    <path d="M360 804h304"
+          stroke="#b98038"
+          stroke-width="24"
+          stroke-linecap="round"/>
+  </g>
 </svg>
