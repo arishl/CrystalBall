@@ -5,8 +5,14 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-const REPO_API: &str = "https://api.github.com/repos/arishl/CrystalBall/releases/latest";
+const RELEASES_API: &str = "https://api.github.com/repos/arishl/CrystalBall/releases?per_page=20";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReleaseInfo {
+    tag_name: String,
+    download_url: String,
+}
 
 #[derive(Debug)]
 pub enum UpdateStatus {
@@ -43,26 +49,24 @@ pub fn start_check() -> Receiver<UpdateStatus> {
 }
 
 fn check_and_install() -> Result<Option<String>, String> {
-    let api_body = curl_to_string(REPO_API)?;
-    let latest_tag = json_string_field(&api_body, "tag_name")
-        .ok_or_else(|| "Could not read latest release tag".to_owned())?;
-    let latest_version = latest_tag.trim_start_matches('v');
+    let asset_name = platform_asset_name()?;
+    let api_body = curl_to_string(RELEASES_API)?;
+    let latest_release = newest_versioned_release(&api_body, asset_name)
+        .ok_or_else(|| format!("No full release includes {asset_name}"))?;
+    let latest_version = latest_release.tag_name.trim_start_matches('v');
 
     if !is_newer_version(latest_version, CURRENT_VERSION) {
         return Ok(None);
     }
 
-    let asset_name = platform_asset_name()?;
-    let download_url = browser_download_url(&api_body, asset_name)
-        .ok_or_else(|| format!("Latest release does not include {asset_name}"))?;
     let staging_dir = prepare_staging_dir(latest_version)?;
     let archive_path = staging_dir.join(asset_name);
 
-    curl_to_file(&download_url, &archive_path)?;
+    curl_to_file(&latest_release.download_url, &archive_path)?;
     extract_archive(&archive_path, &staging_dir)?;
     install_from_staging(&staging_dir)?;
 
-    Ok(Some(latest_tag))
+    Ok(Some(latest_release.tag_name))
 }
 
 fn platform_asset_name() -> Result<&'static str, String> {
@@ -262,6 +266,81 @@ fn browser_download_url(body: &str, asset_name: &str) -> Option<String> {
     None
 }
 
+fn newest_versioned_release(body: &str, asset_name: &str) -> Option<ReleaseInfo> {
+    top_level_json_objects(body)
+        .into_iter()
+        .filter(|release| !json_bool_field(release, "draft").unwrap_or(false))
+        .filter(|release| !json_bool_field(release, "prerelease").unwrap_or(false))
+        .filter_map(|release| {
+            let tag_name = json_string_field(release, "tag_name")?;
+            let download_url = browser_download_url(release, asset_name)?;
+            Some(ReleaseInfo {
+                tag_name,
+                download_url,
+            })
+        })
+        .max_by(|left, right| {
+            version_parts(left.tag_name.trim_start_matches('v'))
+                .cmp(&version_parts(right.tag_name.trim_start_matches('v')))
+        })
+}
+
+fn top_level_json_objects(body: &str) -> Vec<&str> {
+    let mut objects = Vec::new();
+    let mut object_start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, char) in body.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if char == '\\' {
+                escaped = true;
+            } else if char == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match char {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    object_start = Some(index);
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if let Some(start) = object_start.take() {
+                        objects.push(&body[start..=index]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    objects
+}
+
+fn json_bool_field(body: &str, field: &str) -> Option<bool> {
+    let needle = format!("\"{field}\":");
+    let start = body.find(&needle)? + needle.len();
+    let value = body[start..].trim_start();
+
+    if value.starts_with("true") {
+        Some(true)
+    } else if value.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn parse_json_string(input: &str) -> Option<String> {
     let mut chars = input.trim_start().chars();
     if chars.next()? != '"' {
@@ -295,4 +374,94 @@ fn version_parts(version: &str) -> Vec<u32> {
         .filter(|part| !part.is_empty())
         .map(|part| part.parse().unwrap_or(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chooses_highest_versioned_release_instead_of_first_release() {
+        let releases = r#"
+        [
+          {
+            "tag_name": "v0.4.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [
+              {
+                "name": "CrystalBall-macos-app.tar.gz",
+                "browser_download_url": "https://example.com/v0.4.0/mac.tar.gz"
+              }
+            ]
+          },
+          {
+            "tag_name": "v0.5.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [
+              {
+                "name": "CrystalBall-macos-app.tar.gz",
+                "browser_download_url": "https://example.com/v0.5.0/mac.tar.gz"
+              }
+            ]
+          }
+        ]
+        "#;
+
+        assert_eq!(
+            newest_versioned_release(releases, "CrystalBall-macos-app.tar.gz"),
+            Some(ReleaseInfo {
+                tag_name: "v0.5.0".to_owned(),
+                download_url: "https://example.com/v0.5.0/mac.tar.gz".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_draft_and_prerelease_updates() {
+        let releases = r#"
+        [
+          {
+            "tag_name": "v0.6.0",
+            "draft": true,
+            "prerelease": false,
+            "assets": [
+              {
+                "name": "CrystalBall-macos-app.tar.gz",
+                "browser_download_url": "https://example.com/v0.6.0/mac.tar.gz"
+              }
+            ]
+          },
+          {
+            "tag_name": "v0.5.0",
+            "draft": false,
+            "prerelease": true,
+            "assets": [
+              {
+                "name": "CrystalBall-macos-app.tar.gz",
+                "browser_download_url": "https://example.com/v0.5.0/mac.tar.gz"
+              }
+            ]
+          },
+          {
+            "tag_name": "v0.4.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [
+              {
+                "name": "CrystalBall-macos-app.tar.gz",
+                "browser_download_url": "https://example.com/v0.4.0/mac.tar.gz"
+              }
+            ]
+          }
+        ]
+        "#;
+
+        assert_eq!(
+            newest_versioned_release(releases, "CrystalBall-macos-app.tar.gz")
+                .map(|release| release.tag_name),
+            Some("v0.4.0".to_owned())
+        );
+    }
 }
