@@ -9,7 +9,7 @@ It is built in Rust with `egui` and `eframe`.
 - File tree with expandable folders, hover previews, and subtle Git status colors.
 - Clickable path breadcrumbs and a Copy Path action for quick navigation.
 - Multi-tab text editor with dirty-file prompts, Save/Revert controls, line numbers, and in-file search.
-- Syntax highlighting for Rust, Python, C, and C++.
+- Syntax highlighting for Rust, Python, C, C++, and Makefiles.
 - Markdown preview support with highlighted fenced code blocks.
 - Fuzzy Quick Open with `Cmd+P` / `Ctrl+P`.
 - Folder search for quickly finding files by name.

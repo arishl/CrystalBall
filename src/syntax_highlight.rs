@@ -34,6 +34,10 @@ pub fn highlighted_code_job_with_width(
     code: &str,
     language: CodeLanguage,
 ) -> egui::text::LayoutJob {
+    if language == CodeLanguage::Makefile {
+        return highlighted_makefile_job_with_width(wrap_width, code);
+    }
+
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width;
 
@@ -177,6 +181,187 @@ fn append_chars(job: &mut egui::text::LayoutJob, chars: &[char], color: egui::Co
     append_text(job, &text, color);
 }
 
+fn highlighted_makefile_job_with_width(wrap_width: f32, code: &str) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+
+    for line in code.split_inclusive('\n') {
+        append_makefile_line(&mut job, line);
+    }
+
+    job
+}
+
+fn append_makefile_line(job: &mut egui::text::LayoutJob, line: &str) {
+    let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+    let newline = if line.ends_with('\n') { "\n" } else { "" };
+    let trimmed_start = line_without_newline.trim_start();
+
+    if trimmed_start.starts_with('#') {
+        append_text(job, line_without_newline, COMMENT);
+        append_text(job, newline, DEFAULT);
+        return;
+    }
+
+    if line_without_newline.starts_with('\t') {
+        append_makefile_recipe(job, line_without_newline);
+        append_text(job, newline, DEFAULT);
+        return;
+    }
+
+    if let Some(comment_index) = find_makefile_comment(line_without_newline) {
+        append_makefile_declaration(job, &line_without_newline[..comment_index]);
+        append_text(job, &line_without_newline[comment_index..], COMMENT);
+    } else {
+        append_makefile_declaration(job, line_without_newline);
+    }
+    append_text(job, newline, DEFAULT);
+}
+
+fn append_makefile_declaration(job: &mut egui::text::LayoutJob, line: &str) {
+    if let Some((keyword, rest)) = split_makefile_directive(line) {
+        let leading_spaces = line.len() - line.trim_start().len();
+        append_text(job, &line[..leading_spaces], DEFAULT);
+        append_text(job, keyword, KEYWORD);
+        append_makefile_inline(job, rest, DEFAULT);
+        return;
+    }
+
+    if let Some(operator) = find_makefile_assignment(line) {
+        append_makefile_inline(job, &line[..operator], KEYWORD);
+        let operator_end = operator + makefile_assignment_operator_len(&line[operator..]);
+        append_text(job, &line[operator..operator_end], PREPROCESSOR);
+        append_makefile_inline(job, &line[operator_end..], DEFAULT);
+        return;
+    }
+
+    if let Some(colon) = find_makefile_target_colon(line) {
+        append_makefile_inline(job, &line[..colon], KEYWORD);
+        append_text(job, ":", PREPROCESSOR);
+        append_makefile_inline(job, &line[colon + 1..], DEFAULT);
+        return;
+    }
+
+    append_makefile_inline(job, line, DEFAULT);
+}
+
+fn split_makefile_directive(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim_start();
+    let keyword_end = trimmed
+        .char_indices()
+        .find(|(_, char)| char.is_ascii_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(trimmed.len());
+    let keyword = &trimmed[..keyword_end];
+
+    if MAKEFILE_KEYWORDS.contains(&keyword) {
+        Some((keyword, &trimmed[keyword_end..]))
+    } else {
+        None
+    }
+}
+
+fn append_makefile_recipe(job: &mut egui::text::LayoutJob, line: &str) {
+    let command_start = line.chars().take_while(|char| *char == '\t').count();
+    append_text(job, &line[..command_start], DEFAULT);
+
+    let rest = &line[command_start..];
+    if let Some(first_word_end) = rest
+        .char_indices()
+        .find(|(_, char)| char.is_ascii_whitespace())
+        .map(|(index, _)| index)
+    {
+        append_text(job, &rest[..first_word_end], TYPE);
+        append_makefile_inline(job, &rest[first_word_end..], DEFAULT);
+    } else {
+        append_text(job, rest, TYPE);
+    }
+}
+
+fn append_makefile_inline(job: &mut egui::text::LayoutJob, text: &str, base_color: egui::Color32) {
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        if let Some(variable_len) = makefile_variable_len(rest) {
+            append_text(job, &rest[..variable_len], TYPE);
+            index += variable_len;
+            continue;
+        }
+
+        let Some((offset, char)) = rest.char_indices().next() else {
+            break;
+        };
+        let char_len = char.len_utf8();
+        append_text(job, &rest[offset..offset + char_len], base_color);
+        index += char_len;
+    }
+}
+
+fn find_makefile_comment(line: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (index, char) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if char == '\\' {
+            escaped = true;
+            continue;
+        }
+        if char == '#' {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn find_makefile_assignment(line: &str) -> Option<usize> {
+    [":=", "?=", "+=", "!="]
+        .iter()
+        .filter_map(|operator| line.find(operator))
+        .chain(line.find('='))
+        .min()
+}
+
+fn makefile_assignment_operator_len(text: &str) -> usize {
+    [":=", "?=", "+=", "!="]
+        .iter()
+        .find(|operator| text.starts_with(**operator))
+        .map_or(1, |operator| operator.len())
+}
+
+fn find_makefile_target_colon(line: &str) -> Option<usize> {
+    let colon = line.find(':')?;
+    if colon == 0
+        || line[..colon]
+            .chars()
+            .any(|char| char == '=' || char == '\t')
+    {
+        return None;
+    }
+    Some(colon)
+}
+
+fn makefile_variable_len(text: &str) -> Option<usize> {
+    if !text.starts_with('$') {
+        return None;
+    }
+
+    let mut chars = text.char_indices();
+    chars.next();
+    match chars.next() {
+        Some((_, '(')) => text.find(')').map(|index| index + 1),
+        Some((_, '{')) => text.find('}').map(|index| index + 1),
+        Some((index, char)) if matches!(char, '@' | '<' | '^' | '?' | '*' | '+' | '%' | '|') => {
+            Some(index + char.len_utf8())
+        }
+        Some((index, char)) if char.is_ascii_alphanumeric() || char == '_' => {
+            Some(index + char.len_utf8())
+        }
+        _ => None,
+    }
+}
+
 fn append_text(job: &mut egui::text::LayoutJob, text: &str, color: egui::Color32) {
     job.append(
         text,
@@ -222,6 +407,7 @@ fn is_keyword(word: &str, language: CodeLanguage) -> bool {
         CodeLanguage::Rust => RUST_KEYWORDS,
         CodeLanguage::C => C_KEYWORDS,
         CodeLanguage::Cpp => CPP_KEYWORDS,
+        CodeLanguage::Makefile => MAKEFILE_KEYWORDS,
     };
 
     keywords.contains(&word)
@@ -233,6 +419,7 @@ fn is_type_or_builtin(word: &str, language: CodeLanguage) -> bool {
         CodeLanguage::Rust => RUST_TYPES,
         CodeLanguage::C => C_TYPES,
         CodeLanguage::Cpp => CPP_TYPES,
+        CodeLanguage::Makefile => MAKEFILE_BUILTINS,
     };
 
     words.contains(&word)
@@ -351,4 +538,43 @@ const CPP_TYPES: &[&str] = &[
     "bool", "char", "double", "float", "int", "int16_t", "int32_t", "int64_t", "int8_t", "long",
     "short", "size_t", "std", "string", "uint16_t", "uint32_t", "uint64_t", "uint8_t", "unsigned",
     "vector", "void",
+];
+
+const MAKEFILE_KEYWORDS: &[&str] = &[
+    "define", "else", "endef", "endif", "export", "if", "ifdef", "ifeq", "ifndef", "ifneq",
+    "include", "override", "private", "sinclude", "undefine", "unexport", "vpath",
+];
+
+const MAKEFILE_BUILTINS: &[&str] = &[
+    "abspath",
+    "addprefix",
+    "addsuffix",
+    "basename",
+    "call",
+    "dir",
+    "error",
+    "eval",
+    "filter",
+    "filter-out",
+    "findstring",
+    "firstword",
+    "foreach",
+    "if",
+    "join",
+    "lastword",
+    "notdir",
+    "or",
+    "patsubst",
+    "realpath",
+    "shell",
+    "sort",
+    "strip",
+    "subst",
+    "suffix",
+    "value",
+    "warning",
+    "wildcard",
+    "word",
+    "wordlist",
+    "words",
 ];

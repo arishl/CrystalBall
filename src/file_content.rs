@@ -21,10 +21,11 @@ pub enum TextKind {
     Plain,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeLanguage {
     C,
     Cpp,
+    Makefile,
     Python,
     Rust,
 }
@@ -80,6 +81,7 @@ pub fn code_language_from_name(name: &str) -> Option<CodeLanguage> {
     match name.trim().to_ascii_lowercase().as_str() {
         "c" => Some(CodeLanguage::C),
         "cc" | "cpp" | "c++" | "cxx" | "h++" | "hh" | "hpp" | "hxx" => Some(CodeLanguage::Cpp),
+        "make" | "makefile" | "mk" => Some(CodeLanguage::Makefile),
         "py" | "python" | "python3" => Some(CodeLanguage::Python),
         "rs" | "rust" => Some(CodeLanguage::Rust),
         _ => None,
@@ -87,6 +89,37 @@ pub fn code_language_from_name(name: &str) -> Option<CodeLanguage> {
 }
 
 fn code_language_from_path(path: &Path) -> Option<CodeLanguage> {
+    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+        if let Some(language) = code_language_from_name(file_name) {
+            return Some(language);
+        }
+    }
+
     let extension = path.extension()?.to_str()?;
     code_language_from_name(extension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_makefiles_by_name_extension_and_fence() {
+        assert_eq!(
+            code_language_from_name("make"),
+            Some(CodeLanguage::Makefile)
+        );
+        assert_eq!(
+            code_language_from_name("makefile"),
+            Some(CodeLanguage::Makefile)
+        );
+        assert_eq!(
+            code_language_from_path(Path::new("Makefile")),
+            Some(CodeLanguage::Makefile)
+        );
+        assert_eq!(
+            code_language_from_path(Path::new("rules.mk")),
+            Some(CodeLanguage::Makefile)
+        );
+    }
 }
